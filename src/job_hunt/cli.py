@@ -70,25 +70,28 @@ def packets(
 
 @app.command()
 def review(
-    limit: int = typer.Option(30, help="How many packets to show"),
+    limit: int = typer.Option(30, help="How many companies to show (one best role each)"),
     track: Optional[str] = typer.Option(None, help="Filter: core | adjacent"),
+    all_roles: bool = typer.Option(False, "--all-roles", help="Show every role (no company dedupe)"),
 ) -> None:
-    """Batch review queue — top scored packets ready to fly."""
+    """Batch review queue — one best role per company by default."""
     db.init_db()
-    rows = db.queue_for_review(limit=limit, track=track)
+    rows = db.queue_for_review(limit=limit, track=track, one_per_company=not all_roles)
     if not rows:
         console.print("[yellow]Queue empty. Run: hunt daily[/]")
         raise typer.Exit()
 
-    table = Table(title=f"Review queue ({len(rows)})")
+    table = Table(title=f"Review queue ({len(rows)} companies)" if not all_roles else f"Review queue ({len(rows)} roles)")
     table.add_column("ID", style="cyan", no_wrap=True)
     table.add_column("Score", justify="right")
     table.add_column("Track")
     table.add_column("Company")
     table.add_column("Title")
     table.add_column("Location")
+    table.add_column("+", justify="right", style="dim")
     for r in rows:
         t = r.get("track") or "core"
+        siblings = int(r.get("sibling_roles") or 0)
         table.add_row(
             r["id"],
             f"{r.get('score', 0):.2f}",
@@ -96,12 +99,16 @@ def review(
             r["company"][:20],
             r["title"][:40],
             (r.get("location") or "")[:22],
+            f"+{siblings}" if siblings else "",
         )
     console.print(table)
+    if not all_roles:
+        console.print("[dim]+N = other scored/ready roles at same company (hidden to avoid over-indexing)[/]")
+        console.print("See all roles: [bold]hunt review --all-roles[/]")
     console.print("\nOpen a packet: [bold]hunt show <id>[/]")
-    console.print("Approve & mark applied/outreach: [bold]hunt approve <id> --applied[/] or [bold]--outreach[/]")
-    console.print("Skip: [bold]hunt skip <id>[/]")
-    console.print("Approve ALL shown: [bold]hunt approve-all --outreach[/]")
+    console.print("After you submit: [bold]hunt approve <id> --applied[/]")
+    console.print("Skip company pick: [bold]hunt skip <id>[/]  (then re-run review for next-best at that co)")
+    console.print("Outreach: [bold]hunt approve <id> --outreach[/]")
 
 
 @app.command()

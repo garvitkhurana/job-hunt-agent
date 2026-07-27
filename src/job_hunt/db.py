@@ -289,11 +289,16 @@ def list_jobs(
         return [dict(r) for r in rows]
 
 
-def queue_for_review(limit: int = 50, track: str | None = None) -> list[dict]:
-    """Jobs with packets ready, not yet applied/approved (and not already applied per inbox)."""
+def queue_for_review(
+    limit: int = 50,
+    track: str | None = None,
+    one_per_company: bool = True,
+) -> list[dict]:
+    """Jobs with packets ready. By default one best role per company (avoid Stripe×21 spam)."""
     clause = "AND j.track = ?" if track else ""
     params: list[Any] = [track] if track else []
-    params.append(limit * 3)  # over-fetch then filter applied companies
+    # Over-fetch so we can still fill `limit` after company dedupe + applied filter
+    params.append(max(limit * 20, 200))
     with connect() as conn:
         rows = conn.execute(
             f"""
@@ -301,19 +306,61 @@ def queue_for_review(limit: int = 50, track: str | None = None) -> list[dict]:
             FROM jobs j
             JOIN packets p ON p.job_id = j.id
             WHERE j.status IN ('packet_ready', 'queued') {clause}
-            ORDER BY j.score DESC
+            ORDER BY j.score DESC, j.company_score DESC, j.updated_at DESC
             LIMIT ?
             """,
             params,
         ).fetchall()
-        out = []
+
+        # Sibling counts among packet_ready/queued (same company)
+        sibling_counts: dict[str, int] = {}
+        for r in rows:
+            key = _norm_company_key(r["company"])
+            sibling_counts[key] = sibling_counts.get(key, 0) + 1
+
+        out: list[dict] = []
+        seen_companies: set[str] = set()
         for r in rows:
             if is_company_already_applied(r["company"]):
                 continue
-            out.append(dict(r))
+            key = _norm_company_key(r["company"])
+            if one_per_company and key in seen_companies:
+                continue
+            if one_per_company:
+                seen_companies.add(key)
+            row = dict(r)
+            row["sibling_roles"] = max(0, sibling_counts.get(key, 1) - 1)
+            out.append(row)
             if len(out) >= limit:
                 break
         return out
+
+
+def company_sibling_roles(company: str, exclude_job_id: str | None = None, limit: int = 20) -> list[dict]:
+    """Other open roles at the same company (for review context)."""
+    key = _norm_company_key(company)
+    if not key:
+        return []
+    out: list[dict] = []
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, company, title, location, score, track, status, url
+            FROM jobs
+            WHERE status IN ('packet_ready', 'queued', 'scored')
+            ORDER BY score DESC
+            LIMIT 800
+            """,
+        ).fetchall()
+    for r in rows:
+        if _norm_company_key(r["company"]) != key:
+            continue
+        if exclude_job_id and r["id"] == exclude_job_id:
+            continue
+        out.append(dict(r))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def emailable(limit: int = 60, track: str | None = None) -> list[dict]:

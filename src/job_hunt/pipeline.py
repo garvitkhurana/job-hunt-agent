@@ -132,24 +132,39 @@ def run_daily(
     # 2) Discover → score
     jobs = run_discover(cfg)
     above = run_score(cfg, jobs)
-    # 3) Build applying list excluding already-applied companies
+    # 3) Build applying list: one best role per company (don't over-index Stripe×N)
     target = cfg.daily.app_target + cfg.daily.outreach_target
-    core = [
-        j
-        for j, b in above
-        if b.track == "core" and not db.is_company_already_applied(j.company)
-    ][:target]
-    adjacent = [
-        j
-        for j, b in above
-        if b.track == "adjacent" and not db.is_company_already_applied(j.company)
-    ][: cfg.daily.adjacent_target]
+
+    def _dedupe_companies(pairs: list, n: int) -> list:
+        seen: set[str] = set()
+        out = []
+        for job, breakdown in pairs:
+            if db.is_company_already_applied(job.company):
+                continue
+            key = (job.company or "").lower().strip()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(job)
+            if len(out) >= n:
+                break
+        return out
+
+    core = _dedupe_companies([(j, b) for j, b in above if b.track == "core"], target)
+    adjacent = _dedupe_companies(
+        [(j, b) for j, b in above if b.track == "adjacent"],
+        cfg.daily.adjacent_target,
+    )
     top_jobs = core + adjacent
     skipped_applied = sum(
         1 for j, _ in above if db.is_company_already_applied(j.company)
     )
     if skipped_applied:
         console.print(f"Skipped [yellow]{skipped_applied}[/] roles at already-applied companies")
+    console.print(
+        f"Packet targets: [cyan]{len(core)}[/] core + [magenta]{len(adjacent)}[/] adjacent "
+        f"(1 best role / company)"
+    )
     if top_jobs:
         made = 0
         with Progress() as progress:

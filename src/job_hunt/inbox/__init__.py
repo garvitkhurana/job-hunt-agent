@@ -131,49 +131,91 @@ def _plain_body(msg: email.message.Message) -> str:
 
 
 def _clean_company(name: str) -> str:
-    name = re.sub(r"\s+", " ", name or "").strip(" \t\n\r\"'.,;:|-")
-    # Drop trailing "team" / "careers" fluff
-    name = re.sub(r"\b(careers|recruiting|talent|team|inc|llc|ltd)\.?$", "", name, flags=re.I).strip()
-    if len(name) < 2:
+    name = re.sub(r"\s+", " ", name or "").strip(" \t\n\r\"'.,;:|!-")
+    # Cut off if we accidentally grabbed a whole sentence
+    for stopper in (
+        ". We ",
+        ". Your ",
+        ". Thank",
+        " — ",
+        " - we ",
+        " we appreciate",
+        " hiring team",
+    ):
+        idx = name.lower().find(stopper.lower())
+        if idx > 2:
+            name = name[:idx]
+    name = re.sub(r"[!]+$", "", name).strip()
+    # Drop trailing fluff
+    name = re.sub(
+        r"\b(careers|recruiting|talent|team|hiring|inc|llc|ltd)\.?$",
+        "",
+        name,
+        flags=re.I,
+    ).strip(" -")
+    # Reject role titles mistaken for companies
+    if re.search(
+        r"\b(product manager|forward.?deployed|engineer|director|internship)\b",
+        name,
+        re.I,
+    ):
+        return ""
+    if len(name) < 2 or len(name) > 60:
         return ""
     if name.lower() in NOISE_COMPANY:
         return ""
-    return name[:80]
+    if name.lower().startswith("the ") and " " in name[4:]:
+        # "the Product Manager" etc.
+        return ""
+    return name[:60]
 
 
 def _extract_from_subject(subject: str) -> tuple[str, str]:
     """Return (company, title) guesses from subject."""
     s = subject.strip()
-    # "Thank you for applying to Stripe"
-    m = re.search(r"thank\s+you\s+for\s+applying(?:\s+to\s+(.+))?$", s, re.I)
+    # "Thank you for applying to Stripe" / "Thank you for applying to Stripe!"
+    m = re.search(r"thank\s+you\s+for\s+applying(?:\s+to\s+(.+?))(?:\s*[!.]|$)", s, re.I)
     if m and m.group(1):
         return _clean_company(m.group(1)), ""
     # "Your application for Senior PM at Stripe"
-    m = re.search(r"application\s+for\s+(.+?)\s+at\s+(.+)$", s, re.I)
+    m = re.search(r"application\s+for\s+(.+?)\s+at\s+(.+?)(?:\s*[!.]|$)", s, re.I)
     if m:
         return _clean_company(m.group(2)), m.group(1).strip()[:120]
     # "Applied: Senior Product Manager @ Anthropic"
     m = re.search(r"applied:\s*(.+?)\s*[@|–—-]\s*(.+)$", s, re.I)
     if m:
         return _clean_company(m.group(2)), m.group(1).strip()[:120]
+    # "Application received — Stripe" / "Application submitted to Mercury"
+    m = re.search(r"application\s+(?:received|submitted)(?:\s+(?:—|-|to)\s+(.+))?$", s, re.I)
+    if m and m.group(1):
+        return _clean_company(m.group(1)), ""
     # "Stripe: Application received"
     m = re.search(r"^([A-Z][\w\s.&'-]{1,40}):\s*application", s, re.I)
+    if m:
+        return _clean_company(m.group(1)), ""
+    # "Discord! Thanks for applying" style — company bang at start
+    m = re.search(r"^([A-Z][\w.&'-]{1,40})!\s+", s)
     if m:
         return _clean_company(m.group(1)), ""
     return "", ""
 
 
 def _extract_from_body(body: str) -> tuple[str, str]:
+    # Prefer short "applying to X" before long sentence captures
+    m = re.search(
+        r"thank\s+you\s+for\s+applying\s+to\s+([A-Z][\w.&'-]*(?:\s+[A-Z][\w.&'-]*){0,4})",
+        body,
+    )
+    if m:
+        return _clean_company(m.group(1)), ""
     for pat in BODY_COMPANY_PATTERNS:
         m = pat.search(body)
         if not m:
             continue
         groups = [g for g in m.groups() if g]
         if len(groups) >= 2:
-            # title, company
             return _clean_company(groups[-1]), groups[0].strip()[:120]
         if len(groups) == 1:
-            # could be company or title — prefer company if short
             g = groups[0].strip()
             if " at " in g.lower():
                 left, right = re.split(r"\s+at\s+", g, maxsplit=1, flags=re.I)
