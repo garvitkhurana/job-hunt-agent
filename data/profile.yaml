@@ -1,0 +1,97 @@
+name: Garvit Khurana
+headline: Product Lead / Engineer II (AI) at BlackRock | Columbia MSBA | Looking for Senior PM / Founding roles
+summary: >
+  Product leader-engineer hybrid currently owning AI product strategy at BlackRock's AI Accelerator.
+  Shipped a RAG-based security creation platform that cut time-to-market for new public bonds by 40%
+  and extended into private credit. Background spans private markets ops, data products, NLP, and
+  early-stage growth product. Seeking Senior/Founding PM roles at ambitious startups in AI, fintech,
+  and B2B platforms across NYC, California, US remote, London, and Canada.
+
+highlights:
+  - "Product Lead / Engineer II, AI Accelerator @ BlackRock (Sep 2024–Present)"
+  - "Owned roadmap for RAG security-creation tool; +40% time-to-market for new public bonds"
+  - "Scaled AI workflows from corporate bonds → complex private credit deals"
+  - "Launched Private Governance Platform; -80% manual intervention, +20% reporting accuracy"
+  - "Columbia MSBA (GPA 3.73) + VIT CSE (GPA 9.33); 4 ML research publications"
+  - "Startup experience: growth product at PadSquad (AdTech)"
+
+skills:
+  product:
+    - Product strategy & roadmap
+    - Discovery → launch lifecycle
+    - Stakeholder collaboration
+    - KPI-driven execution
+    - Go-to-market enablement
+  technical:
+    - Python
+    - SQL
+    - LangChain / LLMs / RAG / NLP
+    - AWS / Azure
+    - A/B testing
+    - ETL
+    - Tableau
+  domains:
+    - Fintech / capital markets
+    - Private markets (PE, credit, infrastructure)
+    - AI / ML products
+    - B2B platforms
+    - Data governance
+
+experience:
+  - company: BlackRock
+    title: Product Lead / Engineer II, AI Accelerator
+    dates: Sep 2024 – Present
+    bullets:
+      - Own product strategy and roadmap for RAG-based security creation tool serving internal and external clients; +40% time-to-market for new public bonds.
+      - Scaled product from standard corporate bonds to complex private credit deals, enabling AI-driven workflows for private credit businesses.
+      - Partner with data scientists on SQL, telemetry, and Azure pipelines for analytics that drive roadmap decisions.
+      - Lead discovery → launch: market research, client feedback, epics/stories, Jira prioritization aligned to AI strategy.
+      - Drive GTM enablement with relationship management; increased adoption across key client segments.
+  - company: BlackRock
+    title: Private Markets Associate
+    dates: Jun 2022 – Aug 2024
+    bullets:
+      - Launched Private Governance Platform to automate monitoring and data-quality controls across PE, private funds, infrastructure, and private credit.
+      - Centralized data governance workflows feeding Aladdin dashboards; +20% reporting accuracy, −80% manual intervention.
+      - Built NLP tools for issuer search and data enrichment for PM teams.
+  - company: APG Asset Management US
+    title: Product Management & Data Science Intern
+    dates: Sep 2021 – May 2022
+    bullets:
+      - ESG factor integration workflows on Azure Databricks.
+      - NLP/ML on hedge fund 13F filings; −30% portfolio risk signal.
+  - company: PadSquad (AdTech startup)
+    title: Growth Product Intern
+    dates: Jun 2021 – Sep 2021
+    bullets:
+      - Automated multi-vendor reporting (−50% time); +20% client acquisition.
+  - company: Hewlett Packard Enterprise
+    title: Big Data Analytics Engineer Intern
+    dates: Jun 2019 – Jul 2019
+    bullets:
+      - CNN air-gesture recognition model (97.9% accuracy) for assistive tech.
+
+education:
+  - school: Columbia Business School & Columbia Engineering
+    degree: M.S. Business Analytics
+    detail: GPA 3.73/4.0
+    year: 2022
+  - school: Vellore Institute of Technology
+    degree: B.Tech Computer Science and Engineering
+    detail: GPA 9.33/10.0
+    year: 2020
+  - school: National University of Singapore
+    degree: Certification in Data Science and Big Data
+    detail: Grade A
+    year: 2019
+
+pitch_angles:
+  founding: >
+    Operator who has shipped AI products inside a complex regulated environment and previously
+    built platforms end-to-end — can own discovery, roadmap, and technical depth as a founding PM.
+  senior_pm: >
+    AI product lead with proven 0→1→scale at BlackRock, bilingual in product and engineering,
+    strong fintech + data product instincts.
+  outreach_hook: >
+    Currently Product Lead on BlackRock's AI Accelerator — shipped a RAG platform that cut bond
+    time-to-market 40% and extended into private credit. Exploring senior/founding PM roles.

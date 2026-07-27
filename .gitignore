@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/hunt.db
+data/packets/
+data/resumes/
+output/
+.DS_Store
+*.egg-info/
+dist/
+build/

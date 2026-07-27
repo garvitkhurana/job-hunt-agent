@@ -1,0 +1,172 @@
+candidate:
+  name: Garvit Khurana
+  email: garvit.khurana@columbia.edu
+  phone: "+1 (646) 763-3302"
+  linkedin: https://www.linkedin.com/in/garvitkhurana/
+  github: https://github.com/garvitkhurana
+  current_title: Product Lead / Engineer II, AI Accelerator @ BlackRock
+  # Paste your Zoom/Calendly link here, or set SCHEDULING_LINK in .env (env wins)
+  scheduling_link: null
+  target_roles:
+    - Senior Product Manager
+    - Staff Product Manager
+    - Founding Product Manager
+    - Head of Product
+    - Product Lead
+    - Co-founder / Founding team (PM/AI)
+  target_keywords:
+    - AI
+    - LLM
+    - RAG
+    - fintech
+    - B2B SaaS
+    - platform
+    - private markets
+    - data products
+    - ML product
+  locations:
+    # Visa-friendly first (boosted in scoring)
+    - London
+    - UK
+    - Canada
+    - Toronto
+    - Vancouver
+    - Remote Canada
+    - New York
+    - NYC
+    - New York City
+    - California
+    - San Francisco
+    - Bay Area
+    - Los Angeles
+    - Remote US
+    - United States
+  # Prefer these geos when ranking (visa-constrained US)
+  priority_locations:
+    - London
+    - UK
+    - Canada
+    - Toronto
+    - Vancouver
+    - Montreal
+    - Remote Canada
+
+filters:
+  min_score: 0.62
+  # Surface strong non-PM roles (forward deployed / applied AI, solutions,
+  # chief of staff, AI strategy, growth, founding eng) — only at good companies
+  include_adjacent_roles: true
+  min_company_tier: 0.75
+  min_adjacent_score: 0.66
+  exclude_keywords:
+    - unpaid
+    - internship
+    - junior
+    - entry level
+    - associate pm
+  prefer_keywords:
+    - senior
+    - staff
+    - founding
+    - head of product
+    - product lead
+    - AI
+    - LLM
+    - platform
+
+daily:
+  app_target: 30
+  outreach_target: 40
+  # extra packets/day for strong non-PM ("adjacent") roles at good companies
+  adjacent_target: 15
+  max_discover: 250
+
+followup:
+  # days after initial touch
+  cadence_days: [3, 7, 14]
+  max_followups: 3
+
+sources:
+  # Public job boards — Greenhouse / Ashby company slugs
+  greenhouse_boards:
+    - stripe
+    - notion
+    - figma
+    - airtable
+    - ramp
+    - brex
+    - plaid
+    - scaleai
+    - anthropic
+    - openai
+    - databricks
+    - huggingface
+    - vercel
+    - linear
+    - retool
+    - coda
+    - asana
+    - dropbox
+    - coinbase
+    - rippling
+    - gusto
+    - mercury
+    - clerk
+    - vercel
+    - runwayml
+    - datadog
+    - mongodb
+    - snowflake
+    - affirm
+    - chime
+    - gusto
+    - cloudflare
+    - discord
+    - robinhood
+    - togetherai
+    - fireworksai
+    - thinkingmachines
+    - xai
+  ashby_boards:
+    - anthropic
+    - openai
+    - ramp
+    - linear
+    - notion
+    - vercel
+    - cursor
+    - perplexity
+    - elevenlabs
+    - harvey
+    - sierra
+    - adept
+    - rethink
+    - edra
+    - modal
+    - replit
+    - supabase
+    - posthog
+    - cohere
+    - langchain
+    - fireworks
+    - cerebras
+    - anyscale
+    - poolside
+    - writer
+    - llamaindex
+    - pinecone
+    - character
+  # Extra company career pages / ATS slugs you care about — edit freely
+  extra_greenhouse: []
+  extra_ashby:
+    - edra
+    - cohere
+
+  # YC company jobs (public jobs API)
+  yc_enabled: true
+
+generation:
+  tone: confident, specific, founder-friendly, no fluff
+  linkedin_max_chars: 280
+  email_max_words: 160
+  cover_max_words: 220
