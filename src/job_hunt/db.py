@@ -294,27 +294,27 @@ def queue_for_review(
     track: str | None = None,
     one_per_company: bool = True,
 ) -> list[dict]:
-    """Jobs with packets ready. By default one best role per company (avoid Stripe×21 spam)."""
-    clause = "AND j.track = ?" if track else ""
+    """Scored / ready roles for look+apply. Default: one best role per company (core or adjacent)."""
+    clause = "AND track = ?" if track else ""
     params: list[Any] = [track] if track else []
-    # Over-fetch so we can still fill `limit` after company dedupe + applied filter
-    params.append(max(limit * 20, 200))
+    params.append(max(limit * 30, 400))
     with connect() as conn:
         rows = conn.execute(
             f"""
-            SELECT j.*, p.linkedin_note, p.email_subject, p.email_body, p.cover_letter
-            FROM jobs j
-            JOIN packets p ON p.job_id = j.id
-            WHERE j.status IN ('packet_ready', 'queued') {clause}
-            ORDER BY j.score DESC, j.company_score DESC, j.updated_at DESC
+            SELECT * FROM jobs
+            WHERE status IN ('scored', 'packet_ready', 'queued')
+              AND score > 0
+              {clause}
+            ORDER BY score DESC, company_score DESC, updated_at DESC
             LIMIT ?
             """,
             params,
         ).fetchall()
 
-        # Sibling counts among packet_ready/queued (same company)
         sibling_counts: dict[str, int] = {}
         for r in rows:
+            if is_company_already_applied(r["company"]):
+                continue
             key = _norm_company_key(r["company"])
             sibling_counts[key] = sibling_counts.get(key, 0) + 1
 
@@ -472,6 +472,9 @@ _COMPANY_ALIASES = {
     "thinking machines lab": "thinking machines",
     "together ai": "together",
     "writer": "writer",
+    "character ai": "character",
+    "mistral ai": "mistral",
+    "hugging face": "huggingface",
 }
 
 

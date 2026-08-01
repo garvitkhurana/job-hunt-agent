@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from rich.console import Console
-from rich.progress import Progress
 
 from .config import AppConfig, load_config
 from . import db
 from .discover import discover_all
 from .match import score_job
-from .generate import generate_packet
 from .models import JobStatus
 
 console = Console()
@@ -34,7 +32,6 @@ def run_score(cfg: AppConfig, jobs: list | None = None) -> list[tuple]:
     if jobs is None:
         rows = db.list_jobs(status=JobStatus.DISCOVERED, limit=500)
         jobs = [db.job_from_row(r) for r in rows]
-        # also re-score anything already scored below threshold? skip for now
     scored = []
     for job in jobs:
         breakdown = score_job(job, cfg)
@@ -52,16 +49,19 @@ def run_score(cfg: AppConfig, jobs: list | None = None) -> list[tuple]:
     adj_n = len(above) - core_n
     console.print(
         f"Scored {len(scored)} · qualifying: [green]{len(above)}[/] "
-        f"([cyan]{core_n}[/] core PM, [magenta]{adj_n}[/] adjacent suggestions)"
+        f"([cyan]{core_n}[/] core PM, [magenta]{adj_n}[/] adjacent)"
     )
     return above
 
 
 def run_packets(cfg: AppConfig, limit: int | None = None, use_llm: bool = True) -> int:
+    """Optional / legacy — daily path no longer generates packets."""
+    from .generate import generate_packet
+    from rich.progress import Progress
+
     limit = limit or (cfg.daily.app_target + cfg.daily.outreach_target)
     floor = min(cfg.filters.min_score, cfg.filters.min_adjacent_score)
     rows = db.list_jobs(status=JobStatus.SCORED, min_score=floor, limit=limit * 3)
-    # Prefer not regenerating existing packets; skip companies already applied (inbox)
     existing = {r["id"] for r in db.list_jobs(status=JobStatus.PACKET_READY, limit=500)}
     candidates = [
         r
@@ -71,7 +71,6 @@ def run_packets(cfg: AppConfig, limit: int | None = None, use_llm: bool = True) 
     if not candidates:
         console.print("[yellow]No new scored jobs needing packets.[/]")
         return 0
-
     made = 0
     with Progress() as progress:
         task = progress.add_task("Generating packets…", total=len(candidates))
@@ -97,7 +96,7 @@ def run_packets(cfg: AppConfig, limit: int | None = None, use_llm: bool = True) 
 
 
 def run_inbox_scan(days: int = 180, mark_applied: bool = True) -> dict | None:
-    """Scan Gmail for application receipts. Soft-skip if IMAP not configured."""
+    """Scan Gmail for application + rejection emails. Soft-skip if IMAP not configured."""
     import os
 
     user = os.getenv("IMAP_USER") or os.getenv("SMTP_USER") or ""
@@ -114,83 +113,40 @@ def run_inbox_scan(days: int = 180, mark_applied: bool = True) -> dict | None:
     synced = db.sync_applied_companies_from_jobs()
     parked = db.park_packets_at_applied_companies()
     console.print(
-        f"Inbox: [cyan]{result.get('hits_saved', 0)}[/] receipts · "
-        f"[green]{result.get('jobs_marked', 0)}[/] jobs marked applied · "
-        f"{len(companies)} companies remembered"
+        f"Inbox: [cyan]{result.get('hits_saved', 0)}[/] emails · "
+        f"applied jobs [green]{result.get('jobs_marked', 0)}[/] · "
+        f"rejected [yellow]{result.get('jobs_rejected', 0)}[/] · "
+        f"{len(companies)} companies blocked"
     )
     if synced or parked:
-        console.print(f"[dim]Synced {synced} cos from tracker · parked {parked} stale packets[/]")
+        console.print(f"[dim]Synced {synced} cos · parked {parked} stale packets[/]")
     return result
 
 
 def run_daily(
     cfg: AppConfig | None = None,
-    use_llm: bool = True,
+    use_llm: bool = True,  # kept for CLI compat; ignored — no LLM in daily
     skip_inbox: bool = False,
 ) -> None:
+    """Look+apply loop: inbox → discover → score → board (no LLM packets)."""
+    _ = use_llm
     cfg = cfg or load_config()
     db.init_db()
-    # 1) Know where you've already applied BEFORE spending LLM on packets
     if not skip_inbox:
         run_inbox_scan()
-    # 2) Discover → score
     jobs = run_discover(cfg)
     above = run_score(cfg, jobs)
-    # 3) Build applying list: one best role per company (don't over-index Stripe×N)
-    target = cfg.daily.app_target + cfg.daily.outreach_target
-
-    def _dedupe_companies(pairs: list, n: int) -> list:
-        seen: set[str] = set()
-        out = []
-        for job, breakdown in pairs:
-            if db.is_company_already_applied(job.company):
-                continue
-            key = (job.company or "").lower().strip()
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(job)
-            if len(out) >= n:
-                break
-        return out
-
-    core = _dedupe_companies([(j, b) for j, b in above if b.track == "core"], target)
-    adjacent = _dedupe_companies(
-        [(j, b) for j, b in above if b.track == "adjacent"],
-        cfg.daily.adjacent_target,
-    )
-    top_jobs = core + adjacent
-    skipped_applied = sum(
-        1 for j, _ in above if db.is_company_already_applied(j.company)
-    )
+    skipped_applied = sum(1 for j, _ in above if db.is_company_already_applied(j.company))
     if skipped_applied:
         console.print(f"Skipped [yellow]{skipped_applied}[/] roles at already-applied companies")
+
+    # One best role per company across core + adjacent
+    review = db.queue_for_review(limit=cfg.daily.app_target + cfg.daily.adjacent_target, one_per_company=True)
+    core_n = sum(1 for r in review if (r.get("track") or "core") == "core")
+    adj_n = len(review) - core_n
     console.print(
-        f"Packet targets: [cyan]{len(core)}[/] core + [magenta]{len(adjacent)}[/] adjacent "
-        f"(1 best role / company)"
+        f"Review ready: [green]{len(review)}[/] companies "
+        f"([cyan]{core_n}[/] core · [magenta]{adj_n}[/] adjacent) — 1 best role each"
     )
-    if top_jobs:
-        made = 0
-        with Progress() as progress:
-            task = progress.add_task("Generating top packets…", total=len(top_jobs))
-            for job in top_jobs:
-                packet = generate_packet(job, cfg, use_llm=use_llm)
-                db.save_packet(
-                    job.id,
-                    {
-                        "tailored_resume_md": packet.tailored_resume_md,
-                        "cover_letter": packet.cover_letter,
-                        "linkedin_note": packet.linkedin_note,
-                        "email_subject": packet.email_subject,
-                        "email_body": packet.email_body,
-                        "founder_pitch": packet.founder_pitch,
-                        "apply_checklist": packet.apply_checklist,
-                    },
-                )
-                made += 1
-                progress.advance(task)
-        console.print(f"Daily run complete — [green]{made}[/] packets ready for batch review")
-    else:
-        console.print("[yellow]No jobs above threshold today. Add more boards in config.yaml.[/]")
     console.print("Stats:", db.stats())
-    console.print("Next: [bold]hunt review[/] → apply/outreach → [bold]hunt approve <id> --applied[/]")
+    console.print("Next: [bold]hunt ui[/] or [bold]hunt board[/] → apply → mark applied")

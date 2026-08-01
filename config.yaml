@@ -5,13 +5,10 @@ candidate:
   linkedin: https://www.linkedin.com/in/garvitkhurana/
   github: https://github.com/garvitkhurana
   current_title: Product Lead / Engineer II, AI Accelerator @ BlackRock
-  # Paste your Zoom/Calendly link here, or set SCHEDULING_LINK in .env (env wins)
   scheduling_link: null
   target_roles:
     - Senior Product Manager
-    - Staff Product Manager
     - Founding Product Manager
-    - Head of Product
     - Product Lead
     - Co-founder / Founding team (PM/AI)
   target_keywords:
@@ -25,7 +22,6 @@ candidate:
     - data products
     - ML product
   locations:
-    # Visa-friendly first (boosted in scoring)
     - London
     - UK
     - Canada
@@ -41,7 +37,6 @@ candidate:
     - Los Angeles
     - Remote US
     - United States
-  # Prefer these geos when ranking (visa-constrained US)
   priority_locations:
     - London
     - UK
@@ -53,8 +48,6 @@ candidate:
 
 filters:
   min_score: 0.62
-  # Surface strong non-PM roles (forward deployed / applied AI, solutions,
-  # chief of staff, AI strategy, growth, founding eng) — only at good companies
   include_adjacent_roles: true
   min_company_tier: 0.75
   min_adjacent_score: 0.66
@@ -66,9 +59,7 @@ filters:
     - associate pm
   prefer_keywords:
     - senior
-    - staff
     - founding
-    - head of product
     - product lead
     - AI
     - LLM
@@ -77,17 +68,15 @@ filters:
 daily:
   app_target: 30
   outreach_target: 40
-  # extra packets/day for strong non-PM ("adjacent") roles at good companies
   adjacent_target: 15
-  max_discover: 250
+  max_discover: 300
 
 followup:
-  # days after initial touch
   cadence_days: [3, 7, 14]
   max_followups: 3
 
 sources:
-  # Public job boards — Greenhouse / Ashby company slugs
+  # Public Greenhouse / Ashby slugs — flat AI/company list (no vibe filtering)
   greenhouse_boards:
     - stripe
     - notion
@@ -112,14 +101,12 @@ sources:
     - gusto
     - mercury
     - clerk
-    - vercel
     - runwayml
     - datadog
     - mongodb
     - snowflake
     - affirm
     - chime
-    - gusto
     - cloudflare
     - discord
     - robinhood
@@ -127,6 +114,19 @@ sources:
     - fireworksai
     - thinkingmachines
     - xai
+    - anduril
+    - palantir
+    - canva
+    - substack
+    - character
+    - glean
+    - vanta
+    - clay
+    - baseten
+    - mistralai
+    - nvidia
+    - apple
+    - meta
   ashby_boards:
     - anthropic
     - openai
@@ -156,13 +156,22 @@ sources:
     - llamaindex
     - pinecone
     - character
-  # Extra company career pages / ATS slugs you care about — edit freely
+    - cognition
+    - midjourney
+    - runway
+    - suno
+    - exa
+    - granola
+    - kalshi
+    - mercor
+    - worldlabs
+    - appliedintuition
   extra_greenhouse: []
   extra_ashby:
     - edra
     - cohere
-
-  # YC company jobs (public jobs API)
+  # Companies from your list with no reliable public GH/Ashby slug (add when known):
+  # deepmind, ssi / safe-superintelligence, physical-intelligence, waymo, a24, turbopuffer
   yc_enabled: true
 
 generation:

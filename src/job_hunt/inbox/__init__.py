@@ -575,9 +575,28 @@ def apply_inbox_hits(
                 if extra not in note:
                     db.set_status_note(jid, f"{note}; {extra}".strip("; "))
                 marked_rejected += 1
-            # Company remembered above — parks remaining open packets via park_packets
         else:
-            for jid in job_ids:
+            # Applied receipt: remember company (blocks review). Only mark job applied if title matches.
+            targets = job_ids
+            if hit.title and job_ids:
+                tnorm = re.sub(r"\W+", " ", hit.title.lower())
+                tight = []
+                for jid in job_ids:
+                    job = db.get_job(jid)
+                    if not job:
+                        continue
+                    jnorm = re.sub(r"\W+", " ", (job.get("title") or "").lower())
+                    tokens = [tok for tok in tnorm.split() if len(tok) > 3]
+                    if tokens and any(tok in jnorm for tok in tokens):
+                        tight.append(jid)
+                if tight:
+                    targets = tight
+                else:
+                    targets = []  # company blocklist is enough
+            elif not hit.title:
+                # No role hint — block company only, don't mass-mark every role applied
+                targets = []
+            for jid in targets:
                 job = db.get_job(jid)
                 if not job or job.get("status") in (
                     JobStatus.APPLIED.value,

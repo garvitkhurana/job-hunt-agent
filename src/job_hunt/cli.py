@@ -35,10 +35,10 @@ def init() -> None:
 
 @app.command("daily")
 def daily(
-    no_llm: bool = typer.Option(False, help="Skip LLM; use template fallbacks"),
+    no_llm: bool = typer.Option(False, help="Ignored — daily no longer generates LLM packets"),
     skip_inbox: bool = typer.Option(False, help="Skip Gmail already-applied scan"),
 ) -> None:
-    """Ideal loop: inbox scan → discover → score → packets (skips already applied)."""
+    """Look+apply loop: inbox → discover → score → board (no email packets)."""
     cfg = load_config()
     db.init_db()
     run_daily(cfg, use_llm=not no_llm, skip_inbox=skip_inbox)

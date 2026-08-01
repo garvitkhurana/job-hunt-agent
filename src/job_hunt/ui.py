@@ -1,4 +1,4 @@
-"""Local status board — one HTML page over SQLite (no new deps)."""
+"""Local look+apply board — one HTML page over SQLite (no new deps)."""
 from __future__ import annotations
 
 import json
@@ -7,45 +7,72 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from . import db
-from .models import JobStatus
+from .contacts import linkedin_people_search, target_personas
+from .models import Job, JobSource, JobStatus
 
 console = Console()
 DEFAULT_PORT = 8765
+
+LI_NOTE = (
+    "Hi — Product Lead on BlackRock's AI Accelerator (RAG platform, +40% bond TTM). "
+    "Curious about {title} at {company}. Open to a quick chat?"
+)
+
+
+def _job_from_row(r: dict) -> Job:
+    return Job(
+        id=r["id"],
+        source=JobSource(r.get("source") or "other"),
+        company=r["company"],
+        title=r["title"],
+        location=r.get("location") or "",
+        url=r.get("url") or "",
+        description=(r.get("description") or "")[:500],
+    )
+
+
+def linkedin_url_for_row(r: dict) -> str:
+    try:
+        job = _job_from_row(r)
+        personas = target_personas(job)
+        titles = personas[0].titles if personas else ["Head of Product", "VP Product"]
+        return linkedin_people_search(r["company"], titles)
+    except Exception:
+        return linkedin_people_search(r["company"], ["Head of Product", "VP Product"])
+
+
+def note_for_row(r: dict) -> str:
+    return LI_NOTE.format(title=r.get("title") or "the role", company=r.get("company") or "your team")[
+        :280
+    ]
 
 
 def snapshot() -> dict:
     db.init_db()
     stats = db.stats()
-    applied_jobs = [
-        r
-        for r in db.list_jobs(status=JobStatus.APPLIED, limit=50, order="updated_at DESC")
-    ]
-    # also outreach / followup as "in flight"
-    in_flight = []
-    for st in (JobStatus.OUTREACH_SENT, JobStatus.FOLLOWUP_SENT, JobStatus.FOLLOWUP_DUE, JobStatus.INTERVIEW):
-        in_flight.extend(db.list_jobs(status=st, limit=50, order="updated_at DESC"))
-    review = db.queue_for_review(limit=20, one_per_company=True)
-    suggestions = db.suggestions(limit=12, min_score=0.66)
+    review = db.queue_for_review(limit=25, one_per_company=True)
+    for r in review:
+        r["linkedin_url"] = linkedin_url_for_row(r)
+        r["linkedin_note"] = note_for_row(r)
     applied_cos = db.list_applied_companies(limit=100)
-    due = db.due_followups(limit=50)
+    applied_jobs = db.list_jobs(status=JobStatus.APPLIED, limit=30, order="updated_at DESC")
+    suggestions = db.suggestions(limit=10, min_score=0.66)
     return {
         "stats": stats,
-        "applied_jobs": applied_jobs,
-        "in_flight": in_flight,
         "review": review,
         "suggestions": suggestions,
         "applied_companies": applied_cos,
-        "followups_due": due,
+        "applied_jobs": applied_jobs,
         "totals": {
-            "applied_jobs": stats.get("applied", 0),
             "applied_companies": len(applied_cos),
             "review_companies": len(review),
-            "packet_ready": stats.get("packet_ready", 0),
-            "followups_due": len(due),
+            "scored": stats.get("scored", 0),
+            "applied_jobs": stats.get("applied", 0),
             "suggestions": len(suggestions),
-            "skipped": stats.get("skipped", 0),
         },
     }
 
@@ -62,48 +89,28 @@ def _esc(s: object) -> str:
 
 def render_html(data: dict) -> str:
     t = data["totals"]
-    stats_rows = "".join(
-        f"<tr><td>{_esc(k)}</td><td class='num'>{v}</td></tr>"
-        for k, v in sorted(data["stats"].items(), key=lambda x: -x[1])
-    )
-    applied_cos = "".join(
-        f"<tr><td>{_esc(r['company'])}</td><td>{_esc((r.get('title') or '')[:50])}</td>"
-        f"<td class='dim'>{_esc(r.get('source'))}</td></tr>"
-        for r in data["applied_companies"]
-    )
-    applied_jobs = "".join(
-        f"<tr><td>{_esc(r['company'])}</td><td>{_esc(r['title'][:55])}</td>"
-        f"<td>{_esc((r.get('location') or '')[:28])}</td>"
-        f"<td><a href='{_esc(r.get('url'))}' target='_blank' rel='noopener'>open</a></td></tr>"
-        for r in data["applied_jobs"]
-    )
     review_rows = "".join(
         f"<tr>"
-        f"<td><code>{_esc(r['id'])}</code></td>"
         f"<td class='num'>{r.get('score', 0):.2f}</td>"
-        f"<td>{_esc(r.get('track'))}</td>"
+        f"<td>{_esc(r.get('track') or 'core')}</td>"
         f"<td><strong>{_esc(r['company'])}</strong></td>"
-        f"<td>{_esc(r['title'][:48])}</td>"
-        f"<td>{_esc((r.get('location') or '')[:22])}</td>"
+        f"<td>{_esc(r['title'][:52])}</td>"
+        f"<td>{_esc((r.get('location') or '')[:24])}</td>"
         f"<td class='dim'>{'+' + str(r['sibling_roles']) if r.get('sibling_roles') else ''}</td>"
         f"<td class='actions'>"
-        f"<a class='btn' href='/action?op=applied&id={_esc(r['id'])}'>applied</a> "
-        f"<a class='btn ghost' href='/action?op=skip&id={_esc(r['id'])}'>skip</a> "
-        f"<a href='{_esc(r.get('url'))}' target='_blank' rel='noopener'>apply↗</a>"
+        f"<a href='{_esc(r.get('url'))}' target='_blank' rel='noopener'>Apply</a> · "
+        f"<a href='{_esc(r.get('linkedin_url'))}' target='_blank' rel='noopener'>LinkedIn</a><br/>"
+        f"<a class='btn' href='/action?op=applied&id={_esc(r['id'])}'>mark applied</a> "
+        f"<a class='btn ghost' href='/action?op=skip&id={_esc(r['id'])}'>skip</a>"
         f"</td></tr>"
+        f"<tr class='note'><td colspan='7'><span class='dim'>Note:</span> {_esc(r.get('linkedin_note'))}</td></tr>"
         for r in data["review"]
-    )
-    sug_rows = "".join(
-        f"<tr><td class='num'>{r.get('score', 0):.2f}</td>"
-        f"<td>{_esc(r['company'])}</td><td>{_esc(r['title'][:50])}</td>"
-        f"<td>{_esc((r.get('location') or '')[:22])}</td></tr>"
-        for r in data["suggestions"]
-    )
-    fu_rows = "".join(
-        f"<tr><td>{_esc(r['company'])}</td><td>{_esc(r['title'][:45])}</td>"
-        f"<td class='num'>{r.get('followup_count', 0)}</td></tr>"
-        for r in data["followups_due"]
-    ) or "<tr><td colspan='3' class='dim'>None due</td></tr>"
+    ) or "<tr><td colspan='7' class='dim'>Empty — run hunt daily</td></tr>"
+
+    applied_cos = "".join(
+        f"<tr><td>{_esc(r['company'])}</td><td class='dim'>{_esc(r.get('source'))}</td></tr>"
+        for r in data["applied_companies"]
+    ) or "<tr><td colspan='2' class='dim'>None yet</td></tr>"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -113,107 +120,69 @@ def render_html(data: dict) -> str:
 <title>Hunt board</title>
 <style>
   :root {{
-    --bg: #f6f3ee;
-    --ink: #1a1a1a;
-    --muted: #6b6560;
-    --line: #ddd6cb;
-    --card: #fffdf9;
-    --accent: #0b5fff;
-    --ok: #1b7a4e;
+    --bg: #f6f3ee; --ink: #1a1a1a; --muted: #6b6560; --line: #ddd6cb;
+    --card: #fffdf9; --accent: #0b5fff; --ok: #1b7a4e;
   }}
   * {{ box-sizing: border-box; }}
-  body {{
-    margin: 0; font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
-    background: var(--bg); color: var(--ink); line-height: 1.4;
-  }}
-  header {{
-    padding: 1.25rem 1.5rem; border-bottom: 1px solid var(--line);
-    background: var(--card); display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap;
-  }}
-  header h1 {{ margin: 0; font-size: 1.35rem; letter-spacing: -0.02em; font-family: "IBM Plex Serif", Georgia, serif; }}
-  header .meta {{ color: var(--muted); font-size: 0.9rem; }}
-  main {{ padding: 1.25rem 1.5rem 3rem; max-width: 1200px; margin: 0 auto; }}
-  .kpis {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.75rem; margin-bottom: 1.5rem; }}
-  .kpi {{ background: var(--card); border: 1px solid var(--line); padding: 0.85rem 1rem; }}
-  .kpi .n {{ font-size: 1.75rem; font-weight: 600; letter-spacing: -0.03em; }}
-  .kpi .l {{ color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }}
-  section {{ margin-bottom: 1.75rem; }}
-  h2 {{ font-size: 1rem; margin: 0 0 0.6rem; font-family: "IBM Plex Serif", Georgia, serif; }}
-  table {{ width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); font-size: 0.92rem; }}
-  th, td {{ text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--line); vertical-align: top; }}
-  th {{ font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); font-weight: 600; }}
+  body {{ margin: 0; font-family: "IBM Plex Sans", "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }}
+  header {{ padding: 1.1rem 1.4rem; border-bottom: 1px solid var(--line); background: var(--card);
+    display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: .75rem; }}
+  h1 {{ margin: 0; font-size: 1.3rem; font-family: "IBM Plex Serif", Georgia, serif; }}
+  .meta {{ color: var(--muted); font-size: .9rem; }}
+  main {{ padding: 1.2rem 1.4rem 3rem; max-width: 1100px; margin: 0 auto; }}
+  .kpis {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: .7rem; margin-bottom: 1.2rem; }}
+  .kpi {{ background: var(--card); border: 1px solid var(--line); padding: .75rem .9rem; }}
+  .kpi .n {{ font-size: 1.6rem; font-weight: 600; }}
+  .kpi .l {{ color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }}
+  h2 {{ font-size: 1rem; margin: 0 0 .55rem; font-family: "IBM Plex Serif", Georgia, serif; }}
+  table {{ width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); font-size: .9rem; }}
+  th, td {{ text-align: left; padding: .4rem .55rem; border-bottom: 1px solid var(--line); vertical-align: top; }}
+  th {{ font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }}
   .num {{ text-align: right; font-variant-numeric: tabular-nums; }}
   .dim {{ color: var(--muted); }}
-  code {{ font-size: 0.78rem; }}
   a {{ color: var(--accent); }}
-  .btn {{
-    display: inline-block; padding: 0.15rem 0.45rem; border: 1px solid var(--ok);
-    color: var(--ok); text-decoration: none; font-size: 0.78rem; margin-right: 0.25rem;
-  }}
+  .btn {{ display: inline-block; padding: .12rem .4rem; border: 1px solid var(--ok); color: var(--ok);
+    text-decoration: none; font-size: .75rem; margin-right: .2rem; }}
   .btn.ghost {{ border-color: var(--muted); color: var(--muted); }}
-  .actions {{ white-space: nowrap; }}
-  .grid2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }}
+  tr.note td {{ font-size: .82rem; background: #faf8f4; border-bottom: 2px solid var(--line); }}
+  .grid2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1.4rem; }}
   @media (max-width: 800px) {{ .grid2 {{ grid-template-columns: 1fr; }} }}
 </style>
 </head>
 <body>
 <header>
   <h1>Hunt board</h1>
-  <div class="meta">Local · refresh to reload · <a href="/">refresh</a></div>
+  <div class="meta">Look → apply → mark · <a href="/">refresh</a></div>
 </header>
 <main>
   <div class="kpis">
-    <div class="kpi"><div class="n">{t['applied_jobs']}</div><div class="l">Applied jobs</div></div>
-    <div class="kpi"><div class="n">{t['applied_companies']}</div><div class="l">Cos (inbox)</div></div>
-    <div class="kpi"><div class="n">{t['review_companies']}</div><div class="l">Review now</div></div>
-    <div class="kpi"><div class="n">{t['packet_ready']}</div><div class="l">Packets</div></div>
-    <div class="kpi"><div class="n">{t['followups_due']}</div><div class="l">Follow-ups due</div></div>
-    <div class="kpi"><div class="n">{t['suggestions']}</div><div class="l">Adjacent</div></div>
+    <div class="kpi"><div class="n">{t['review_companies']}</div><div class="l">To review</div></div>
+    <div class="kpi"><div class="n">{t['applied_companies']}</div><div class="l">Applied cos</div></div>
+    <div class="kpi"><div class="n">{t['scored']}</div><div class="l">Scored roles</div></div>
+    <div class="kpi"><div class="n">{t['suggestions']}</div><div class="l">Adjacent shown</div></div>
   </div>
 
   <section>
-    <h2>Review queue (1 best role / company)</h2>
+    <h2>Review (1 best role / company)</h2>
     <table>
-      <thead><tr><th>ID</th><th>Score</th><th>Track</th><th>Company</th><th>Title</th><th>Location</th><th>+</th><th></th></tr></thead>
-      <tbody>{review_rows or "<tr><td colspan='8' class='dim'>Empty — run hunt daily</td></tr>"}</tbody>
+      <thead><tr><th>Score</th><th>Track</th><th>Company</th><th>Title</th><th>Location</th><th>+</th><th></th></tr></thead>
+      <tbody>{review_rows}</tbody>
     </table>
   </section>
 
   <div class="grid2">
     <section>
-      <h2>Already applied companies (inbox)</h2>
+      <h2>Already applied / out (inbox)</h2>
       <table>
-        <thead><tr><th>Company</th><th>Role hint</th><th>Source</th></tr></thead>
-        <tbody>{applied_cos or "<tr><td colspan='3' class='dim'>None</td></tr>"}</tbody>
+        <thead><tr><th>Company</th><th>Source</th></tr></thead>
+        <tbody>{applied_cos}</tbody>
       </table>
     </section>
     <section>
-      <h2>Applied jobs (tracker)</h2>
-      <table>
-        <thead><tr><th>Company</th><th>Title</th><th>Location</th><th></th></tr></thead>
-        <tbody>{applied_jobs or "<tr><td colspan='4' class='dim'>Mark with Applied on review rows</td></tr>"}</tbody>
-      </table>
-    </section>
-  </div>
-
-  <div class="grid2">
-    <section>
-      <h2>Adjacent suggestions</h2>
-      <table>
-        <thead><tr><th>Score</th><th>Company</th><th>Title</th><th>Location</th></tr></thead>
-        <tbody>{sug_rows or "<tr><td colspan='4' class='dim'>None</td></tr>"}</tbody>
-      </table>
-    </section>
-    <section>
-      <h2>Follow-ups due</h2>
-      <table>
-        <thead><tr><th>Company</th><th>Title</th><th>#</th></tr></thead>
-        <tbody>{fu_rows}</tbody>
-      </table>
-      <h2 style="margin-top:1.25rem">Pipeline counts</h2>
+      <h2>Pipeline</h2>
       <table>
         <thead><tr><th>Status</th><th>Count</th></tr></thead>
-        <tbody>{stats_rows}</tbody>
+        <tbody>{"".join(f"<tr><td>{_esc(k)}</td><td class='num'>{v}</td></tr>" for k, v in sorted(data['stats'].items(), key=lambda x: -x[1]))}</tbody>
       </table>
     </section>
   </div>
@@ -223,7 +192,7 @@ def render_html(data: dict) -> str:
 
 
 class BoardHandler(BaseHTTPRequestHandler):
-    def log_message(self, fmt: str, *args) -> None:  # quieter
+    def log_message(self, fmt: str, *args) -> None:
         console.print(f"[dim]ui[/] {args[0] if args else fmt}")
 
     def do_GET(self) -> None:
@@ -237,18 +206,11 @@ class BoardHandler(BaseHTTPRequestHandler):
                 from .config import load_config
 
                 cfg = load_config()
-                packet = db.get_packet(jid) or {}
-                db.mark_sent(
-                    jid,
-                    "application",
-                    "portal",
-                    packet.get("cover_letter") or "",
-                    0,
-                    cfg.followup.cadence_days,
-                )
                 job = db.get_job(jid)
+                db.mark_sent(jid, "application", "portal", "", 0, cfg.followup.cadence_days)
                 if job:
                     db.remember_applied_company(job["company"], source="manual", title=job.get("title") or "")
+                    db.park_packets_at_applied_companies()
             elif jid and op == "skip":
                 db.set_status(jid, JobStatus.SKIPPED)
             self.send_response(302)
@@ -257,8 +219,7 @@ class BoardHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path in ("/", "/index.html", "/board"):
-            html = render_html(snapshot())
-            body = html.encode("utf-8")
+            body = render_html(snapshot()).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -295,52 +256,36 @@ def serve(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
 
 
 def print_board() -> None:
-    """Rich terminal one-pager."""
-    from rich.panel import Panel
-    from rich.table import Table
-
     data = snapshot()
     t = data["totals"]
     console.print(
         Panel.fit(
-            f"[bold]Applied jobs[/] {t['applied_jobs']}   "
-            f"[bold]Inbox cos[/] {t['applied_companies']}   "
-            f"[bold]Review[/] {t['review_companies']} cos   "
-            f"[bold]Follow-ups due[/] {t['followups_due']}",
+            f"[bold]Review[/] {t['review_companies']} cos · "
+            f"[bold]Applied cos[/] {t['applied_companies']} · "
+            f"[bold]Scored[/] {t['scored']}",
             title="Hunt board",
         )
     )
-
     table = Table(title="Review (1 / company)")
-    table.add_column("ID", style="cyan", no_wrap=True)
     table.add_column("Score", justify="right")
+    table.add_column("Track")
     table.add_column("Company")
     table.add_column("Title")
     table.add_column("+", justify="right", style="dim")
     for r in data["review"]:
         sib = int(r.get("sibling_roles") or 0)
         table.add_row(
-            r["id"],
             f"{r.get('score', 0):.2f}",
+            r.get("track") or "core",
             r["company"][:18],
             r["title"][:40],
             f"+{sib}" if sib else "",
         )
     console.print(table)
-
-    cos = Table(title=f"Already applied companies ({len(data['applied_companies'])})")
+    cos = Table(title=f"Already applied ({len(data['applied_companies'])})")
     cos.add_column("Company")
     cos.add_column("Source")
-    for r in data["applied_companies"][:20]:
+    for r in data["applied_companies"][:25]:
         cos.add_row(r["company"], r.get("source") or "")
     console.print(cos)
-
-    if data["applied_jobs"]:
-        aj = Table(title="Applied jobs")
-        aj.add_column("Company")
-        aj.add_column("Title")
-        for r in data["applied_jobs"]:
-            aj.add_row(r["company"], r["title"][:50])
-        console.print(aj)
-
-    console.print("\nBrowser UI: [bold]hunt ui[/]")
+    console.print("\nBrowser: [bold]hunt ui[/]")
