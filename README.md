@@ -176,6 +176,8 @@ APOLLO_API_KEY=...                               # optional, finds real emails
 
 ```bash
 hunt daily                  # inbox first → discover → score → packets
+hunt board                  # where you are (terminal)
+hunt ui                     # local web dashboard
 hunt review --track core    # finalize applying list
 hunt suggest
 # for each top role:

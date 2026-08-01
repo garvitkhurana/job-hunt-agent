@@ -111,11 +111,15 @@ def run_inbox_scan(days: int = 180, mark_applied: bool = True) -> dict | None:
 
     result = scan_inbox(days=days, mark_applied=mark_applied, dry_run=False)
     companies = result.get("companies") or []
+    synced = db.sync_applied_companies_from_jobs()
+    parked = db.park_packets_at_applied_companies()
     console.print(
         f"Inbox: [cyan]{result.get('hits_saved', 0)}[/] receipts · "
         f"[green]{result.get('jobs_marked', 0)}[/] jobs marked applied · "
         f"{len(companies)} companies remembered"
     )
+    if synced or parked:
+        console.print(f"[dim]Synced {synced} cos from tracker · parked {parked} stale packets[/]")
     return result
 
 

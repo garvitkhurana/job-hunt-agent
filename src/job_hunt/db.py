@@ -384,20 +384,32 @@ def emailable(limit: int = 60, track: str | None = None) -> list[dict]:
 
 
 def suggestions(limit: int = 25, min_score: float = 0.0) -> list[dict]:
-    """Adjacent-track roles worth a look, best companies first."""
+    """Adjacent-track roles worth a look, best companies first (skip already-applied cos)."""
     with connect() as conn:
         rows = conn.execute(
             """
             SELECT * FROM jobs
             WHERE track = 'adjacent'
               AND score >= ?
-              AND status NOT IN ('skipped', 'rejected', 'closed')
+              AND status NOT IN ('skipped', 'rejected', 'closed', 'applied')
             ORDER BY company_score DESC, score DESC
             LIMIT ?
             """,
-            (min_score, limit),
+            (min_score, limit * 5),
         ).fetchall()
-        return [dict(r) for r in rows]
+    out: list[dict] = []
+    seen: set[str] = set()
+    for r in rows:
+        if is_company_already_applied(r["company"]):
+            continue
+        key = _norm_company_key(r["company"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(dict(r))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def mark_sent(job_id: str, touch_type: str, channel: str, content: str, followup_n: int = 0, cadence_days: list[int] | None = None) -> None:
@@ -451,19 +463,51 @@ def stats() -> dict[str, int]:
         return {r["status"]: r["c"] for r in rows}
 
 
+# Common board slug / ATS name mismatches
+_COMPANY_ALIASES = {
+    "scaleai": "scale",
+    "scale ai": "scale",
+    "cohere talent": "cohere",
+    "cohere": "cohere",
+    "thinking machines lab": "thinking machines",
+    "together ai": "together",
+    "writer": "writer",
+}
+
+
 def _norm_company_key(company: str) -> str:
     s = (company or "").lower()
     s = re.sub(r"[^a-z0-9\s]", " ", s)
-    s = re.sub(r"\b(inc|llc|ltd|corp|co|ai|labs?|technologies|technology|software)\b", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"\b(inc|llc|ltd|corp|co|technologies|technology|software|talent|hiring)\b", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    # Drop trailing generic tokens but keep meaningful short names
+    s = re.sub(r"\b(labs?|ai)\b$", "", s).strip()
+    s = re.sub(r"\s+", " ", s).strip()
+    # Glue form for Scaleai-style single tokens
+    glued = s.replace(" ", "")
+    if s in _COMPANY_ALIASES:
+        return _COMPANY_ALIASES[s]
+    if glued in _COMPANY_ALIASES:
+        return _COMPANY_ALIASES[glued]
+    return s
 
 
 def remember_applied_company(company: str, source: str = "inbox", title: str = "") -> None:
     if not company:
         return
+    # Reject junk sentence-companies / visa spam from bad email parses
+    if len(company) > 40 or re.search(
+        r"\b(after reviewing|we'?ve determined|application to|green card|jinee)\b",
+        company,
+        re.I,
+    ):
+        m = re.match(r"^([A-Z][\w.&'-]{1,30})", company.strip())
+        company = m.group(1) if m and not re.search(r"green|jinee", m.group(1), re.I) else ""
+    if not company:
+        return
     now = datetime.utcnow().isoformat()
     key = _norm_company_key(company)
-    if not key:
+    if not key or len(key) < 2:
         return
     with connect() as conn:
         conn.execute(
@@ -489,6 +533,7 @@ def list_applied_companies(limit: int = 500) -> list[dict]:
 
 
 def is_company_already_applied(company: str) -> bool:
+    """True if inbox/manual list or any job at this company is already applied."""
     key = _norm_company_key(company)
     if not key:
         return False
@@ -497,7 +542,74 @@ def is_company_already_applied(company: str) -> bool:
             "SELECT 1 FROM applied_companies WHERE company_norm=?",
             (key,),
         ).fetchone()
-        return bool(row)
+        if row:
+            return True
+        # Fuzzy: Scaleai ↔ scale, etc.
+        for r in conn.execute("SELECT company_norm FROM applied_companies").fetchall():
+            ak = r["company_norm"] or ""
+            if len(ak) < 4:
+                continue
+            if ak == key or ak in key or key in ak:
+                return True
+            if ak.replace(" ", "") == key.replace(" ", ""):
+                return True
+        # Any tracker job already applied / interviewed / rejected at this company
+        for r in conn.execute(
+            """
+            SELECT DISTINCT company FROM jobs
+            WHERE status IN ('applied', 'interview', 'rejected', 'outreach_sent', 'followup_sent')
+            """
+        ).fetchall():
+            jk = _norm_company_key(r["company"])
+            if not jk:
+                continue
+            if jk == key or (len(jk) >= 4 and (jk in key or key in jk)):
+                return True
+    return False
+
+
+def sync_applied_companies_from_jobs() -> int:
+    """Ensure every company with an applied job is on the applied_companies list."""
+    n = 0
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT company, title FROM jobs
+            WHERE status IN ('applied', 'interview', 'rejected')
+            """
+        ).fetchall()
+    for r in rows:
+        before = is_company_already_applied(r["company"])
+        remember_applied_company(r["company"], source="tracker", title=r["title"] or "")
+        if not before:
+            n += 1
+    return n
+
+
+def park_packets_at_applied_companies() -> int:
+    """Move packet_ready/queued roles at already-applied companies out of the review queue."""
+    now = datetime.utcnow().isoformat()
+    parked = 0
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, company FROM jobs
+            WHERE status IN ('packet_ready', 'queued')
+            """
+        ).fetchall()
+        for r in rows:
+            if is_company_already_applied(r["company"]):
+                conn.execute(
+                    "UPDATE jobs SET status=?, updated_at=?, notes=COALESCE(notes,'') || ? WHERE id=?",
+                    (
+                        JobStatus.SKIPPED.value,
+                        now,
+                        " | parked: already applied at company",
+                        r["id"],
+                    ),
+                )
+                parked += 1
+    return parked
 
 
 def upsert_inbox_hit(hit: dict[str, Any]) -> None:

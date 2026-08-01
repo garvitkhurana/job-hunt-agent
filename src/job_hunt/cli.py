@@ -328,7 +328,11 @@ def approve(
             followup_n=0,
             cadence_days=cfg.followup.cadence_days,
         )
+        db.remember_applied_company(job["company"], source="manual", title=job.get("title") or "")
+        parked = db.park_packets_at_applied_companies()
         console.print(f"[green]Marked APPLIED[/] {job['company']} — follow-ups scheduled")
+        if parked:
+            console.print(f"[dim]Parked {parked} other roles at already-applied companies[/]")
     if outreach:
         db.mark_sent(
             job_id,
@@ -422,11 +426,18 @@ def inbox(
     companies = result.get("companies") or []
     console.print(
         f"[green]Saved {result.get('hits_saved', 0)} hits[/] · "
-        f"marked [cyan]{result.get('jobs_marked', 0)}[/] matching jobs as applied"
+        f"applied [cyan]{result.get('jobs_marked', 0)}[/] · "
+        f"rejected [yellow]{result.get('jobs_rejected', 0)}[/] · "
+        f"parked {result.get('parked', 0)}"
     )
     if companies:
-        console.print("Already-applied companies:")
+        console.print("Companies (applied or out of consideration):")
         for c in companies:
+            console.print(f"  • {c}")
+    rejected = result.get("rejected_companies") or []
+    if rejected:
+        console.print("Rejected / out of consideration:")
+        for c in rejected:
             console.print(f"  • {c}")
     console.print("List later: [bold]hunt applied[/]")
 
@@ -452,6 +463,25 @@ def applied(limit: int = typer.Option(100)) -> None:
             (r.get("last_seen_at") or "")[:19],
         )
     console.print(table)
+
+
+@app.command()
+def board() -> None:
+    """One-pager: applied / inbox cos / review / follow-ups (terminal)."""
+    from .ui import print_board
+
+    print_board()
+
+
+@app.command()
+def ui(
+    port: int = typer.Option(8765, help="Local port"),
+    no_browser: bool = typer.Option(False, help="Don't open browser"),
+) -> None:
+    """Local web dashboard — review, applied, suggestions, mark applied/skip."""
+    from .ui import serve
+
+    serve(port=port, open_browser=not no_browser)
 
 
 @app.command()

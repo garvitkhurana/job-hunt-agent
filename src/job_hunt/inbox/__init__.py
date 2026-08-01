@@ -1,8 +1,8 @@
-"""Scan Gmail (IMAP) for job-application confirmation emails.
+"""Scan Gmail (IMAP) for job-application + rejection emails.
 
-Looks for Greenhouse / Ashby / Lever / Workday / LinkedIn receipts and
-"thank you for applying" style subjects, then extracts company (+ role when
-possible) so the tracker can mark matches as already applied.
+Catches Greenhouse / Ashby / Lever / Workday / LinkedIn receipts,
+"thank you for applying", and out-of-consideration / rejection updates.
+Marks companies so review won't re-surface them.
 """
 from __future__ import annotations
 
@@ -36,7 +36,6 @@ ATS_FROM_HINTS = (
     "smartrecruiters.com",
     "icims.com",
     "jobvite.com",
-    "greenhouse.io",
     "notify.linkedin.com",
     "jobs-noreply@linkedin.com",
     "linkedin.com",
@@ -49,16 +48,47 @@ ATS_FROM_HINTS = (
 )
 
 SUBJECT_PATTERNS = [
-    re.compile(r"thank\s+you\s+for\s+applying(?:\s+to\s+(.+))?", re.I),
-    re.compile(r"application\s+(?:received|submitted|confirmed)", re.I),
+    re.compile(r"thank\s+you\s+for\s+(?:your\s+)?apply", re.I),
+    re.compile(r"thanks\s+for\s+(?:your\s+)?apply", re.I),
+    re.compile(r"application\s+(?:received|submitted|confirmed|update)", re.I),
     re.compile(r"we\s+(?:have\s+)?received\s+your\s+application", re.I),
-    re.compile(r"your\s+application\s+(?:to|for)\s+(.+)", re.I),
-    re.compile(r"applied:\s*(.+)", re.I),
-    re.compile(r"application\s+for\s+(.+?)\s+at\s+(.+)", re.I),
+    re.compile(r"your\s+application\s+(?:to|for)\s+", re.I),
+    re.compile(r"applied:\s*", re.I),
+    re.compile(r"regarding\s+your\s+application", re.I),
+    re.compile(r"update\s+on\s+your\s+application", re.I),
+    re.compile(r"application\s+status", re.I),
+    re.compile(r"not\s+moving\s+forward", re.I),
+    re.compile(r"out\s+of\s+consideration", re.I),
+    re.compile(r"decided\s+not\s+to\s+(?:move|proceed)", re.I),
+    re.compile(r"other\s+candidates", re.I),
+    re.compile(r"will\s+not\s+be\s+moving\s+forward", re.I),
+    re.compile(r"unfortunately", re.I),
+    re.compile(r"we(?:'ve| have) decided", re.I),
 ]
 
+# Signals that this email means rejection / out of consideration (not just receipt)
+REJECTION_SUBJECT = re.compile(
+    r"(not\s+moving\s+forward|out\s+of\s+consideration|"
+    r"other\s+candidates|decided\s+not\s+to|will\s+not\s+be\s+moving|"
+    r"application\s+unsuccessful|we\s+regret\s+to\s+inform)",
+    re.I,
+)
+REJECTION_BODY = re.compile(
+    r"(not\s+(?:be\s+)?moving\s+forward|out\s+of\s+consideration|"
+    r"decided\s+not\s+to\s+(?:move|proceed|advance)|"
+    r"will\s+not\s+be\s+progressing|pursue\s+other\s+candidates|"
+    r"after\s+careful\s+(?:review|consideration)|"
+    r"after\s+reviewing\s+your\s+application.{0,80}(?:determined|decided|unfortunately)|"
+    r"we(?:'ve| have)\s+determined\s+that|"
+    r"not\s+selected\s+(?:to\s+)?(?:move|advance|proceed)|"
+    r"position\s+has\s+been\s+filled|"
+    r"we\s+will\s+not\s+be\s+proceeding|"
+    r"we\s+regret\s+to\s+inform)",
+    re.I,
+)
+
 BODY_COMPANY_PATTERNS = [
-    re.compile(r"thank\s+you\s+for\s+applying\s+to\s+([A-Z][\w\s.&'-]{1,60})", re.I),
+    re.compile(r"thank\s+you\s+for\s+(?:your\s+)?apply(?:ing|ication)\s+to\s+([A-Z][\w\s.&'-]{1,60})", re.I),
     re.compile(r"application\s+(?:for|to)\s+(.{5,80}?)\s+at\s+([A-Z][\w\s.&'-]{1,60})", re.I),
     re.compile(r"applied\s+to\s+(?:the\s+)?(.{5,80}?)\s+(?:role\s+)?at\s+([A-Z][\w\s.&'-]{1,60})", re.I),
     re.compile(r"position:\s*(.+)", re.I),
@@ -93,6 +123,7 @@ class InboxHit:
     title: str = ""
     confidence: float = 0.0
     raw_snippet: str = ""
+    kind: str = "applied"  # applied | rejected
     matched_job_ids: list[str] = field(default_factory=list)
 
 
@@ -173,11 +204,36 @@ def _clean_company(name: str) -> str:
 def _extract_from_subject(subject: str) -> tuple[str, str]:
     """Return (company, title) guesses from subject."""
     s = subject.strip()
-    # "Thank you for applying to Stripe" / "Thank you for applying to Stripe!"
-    m = re.search(r"thank\s+you\s+for\s+applying(?:\s+to\s+(.+?))(?:\s*[!.]|$)", s, re.I)
+    # "Garvit, Thank You for Applying to Brex!"
+    m = re.search(
+        r"^[^,]{1,40},\s*thank\s+you\s+for\s+(?:your\s+)?apply(?:ing|ication)\s+to\s+(.+?)(?:\s*[!.]|$)",
+        s,
+        re.I,
+    )
+    if m:
+        return _clean_company(m.group(1)), ""
+    # "Thank you for applying to Stripe" / "Thank you for your application to Asana!"
+    m = re.search(
+        r"thank\s+you\s+for\s+(?:your\s+)?apply(?:ing|ication)(?:\s+to\s+(.+?))?(?:\s*[!.]|$)",
+        s,
+        re.I,
+    )
     if m and m.group(1):
         return _clean_company(m.group(1)), ""
-    # "Your application for Senior PM at Stripe"
+    # "Thanks for applying to Cohere!" / "Thanks for your application to X"
+    m = re.search(
+        r"thanks\s+for\s+(?:your\s+)?apply(?:ing|ication)(?:\s+to\s+(.+?))?(?:\s*[!.]|$)",
+        s,
+        re.I,
+    )
+    if m and m.group(1):
+        return _clean_company(m.group(1)), ""
+    # "Your application for Senior PM at Stripe" / "Your application to Stripe"
+    m = re.search(r"your\s+application\s+(?:for\s+(.+?)\s+at\s+|to\s+)(.+?)(?:\s*[!.]|$)", s, re.I)
+    if m:
+        title = (m.group(1) or "").strip()[:120]
+        return _clean_company(m.group(2)), title
+    # "Application for … at …"
     m = re.search(r"application\s+for\s+(.+?)\s+at\s+(.+?)(?:\s*[!.]|$)", s, re.I)
     if m:
         return _clean_company(m.group(2)), m.group(1).strip()[:120]
@@ -185,12 +241,33 @@ def _extract_from_subject(subject: str) -> tuple[str, str]:
     m = re.search(r"applied:\s*(.+?)\s*[@|–—-]\s*(.+)$", s, re.I)
     if m:
         return _clean_company(m.group(2)), m.group(1).strip()[:120]
-    # "Application received — Stripe" / "Application submitted to Mercury"
-    m = re.search(r"application\s+(?:received|submitted)(?:\s+(?:—|-|to)\s+(.+))?$", s, re.I)
+    # "Edra Update - AI Engineer (London)" / "Company Update: Role"
+    m = re.search(r"^([A-Z][\w.&'-]{1,40})\s+update\s*[-–—:]\s*(.+)$", s, re.I)
+    if m:
+        return _clean_company(m.group(1)), m.group(2).strip()[:120]
+    # "Update on your application to Stripe" / "Application update from Figma"
+    m = re.search(
+        r"(?:update\s+on\s+your\s+application|application\s+update|regarding\s+your\s+application)"
+        r"(?:\s+(?:to|from|at|-)\s+(.+))?$",
+        s,
+        re.I,
+    )
     if m and m.group(1):
         return _clean_company(m.group(1)), ""
+    # "Application received — Stripe" / "ElevenLabs | Application Received"
+    m = re.search(
+        r"^(?:(.+?)\s*[|\-–—]\s*)?application\s+(?:received|submitted)(?:\s+(?:—|-|to)\s+(.+))?$",
+        s,
+        re.I,
+    )
+    if m:
+        return _clean_company(m.group(2) or m.group(1) or ""), ""
     # "Stripe: Application received"
     m = re.search(r"^([A-Z][\w\s.&'-]{1,40}):\s*application", s, re.I)
+    if m:
+        return _clean_company(m.group(1)), ""
+    # "Regarding your application to Modal"
+    m = re.search(r"application\s+to\s+(.+?)(?:\s*[!.]|$)", s, re.I)
     if m:
         return _clean_company(m.group(1)), ""
     # "Discord! Thanks for applying" style — company bang at start
@@ -200,11 +277,36 @@ def _extract_from_subject(subject: str) -> tuple[str, str]:
     return "", ""
 
 
+def _detect_kind(subject: str, body: str) -> str:
+    blob = f"{subject}\n{body[:2500]}"
+    thanks = re.search(r"thank(?:s| you)\s+for\s+(?:your\s+)?apply", subject, re.I)
+    if thanks:
+        return "applied"
+    if REJECTION_SUBJECT.search(subject):
+        return "rejected"
+    # "Company Update - Role" only if body clearly rejects
+    if re.search(r"\bupdate\b", subject, re.I) and REJECTION_BODY.search(body[:2500] or ""):
+        return "rejected"
+    if REJECTION_BODY.search(blob):
+        return "rejected"
+    return "applied"
+
+
 def _extract_from_body(body: str) -> tuple[str, str]:
-    # Prefer short "applying to X" before long sentence captures
+    # Prefer short "applying / application to X" before long sentence captures
     m = re.search(
-        r"thank\s+you\s+for\s+applying\s+to\s+([A-Z][\w.&'-]*(?:\s+[A-Z][\w.&'-]*){0,4})",
+        r"thank\s+you\s+for\s+(?:your\s+)?apply(?:ing|ication)\s+to\s+"
+        r"([A-Z][\w.&'-]*(?:\s+[A-Z][\w.&'-]*){0,4})",
         body,
+        re.I,
+    )
+    if m:
+        return _clean_company(m.group(1)), ""
+    m = re.search(
+        r"thanks\s+for\s+(?:your\s+)?apply(?:ing|ication)\s+to\s+"
+        r"([A-Z][\w.&'-]*(?:\s+[A-Z][\w.&'-]*){0,4})",
+        body,
+        re.I,
     )
     if m:
         return _clean_company(m.group(1)), ""
@@ -241,30 +343,34 @@ def parse_message(raw: bytes) -> Optional[InboxHit]:
     date = _decode(msg.get("Date"))
     mid = (msg.get("Message-ID") or "").strip() or f"{from_addr}|{subject}|{date}"
 
+    body = _plain_body(msg)
     ats = _from_looks_ats(from_addr, from_name)
     applyish = _subject_looks_apply(subject)
-    if not ats and not applyish:
+    rejectish = bool(REJECTION_SUBJECT.search(subject) or REJECTION_BODY.search(body[:2500]))
+    if not ats and not applyish and not rejectish:
         return None
 
-    body = _plain_body(msg)
     company, title = _extract_from_subject(subject)
     if not company:
         c2, t2 = _extract_from_body(body)
         company = company or c2
         title = title or t2
     if not company and from_name and not _from_looks_ats("", from_name):
-        # Display name sometimes is the company
         company = _clean_company(from_name)
+
+    kind = _detect_kind(subject, body)
 
     conf = 0.4
     if ats:
         conf += 0.25
-    if applyish:
+    if applyish or rejectish:
         conf += 0.2
     if company:
         conf += 0.15
     if title:
         conf += 0.05
+    if kind == "rejected" and company:
+        conf = max(conf, 0.7)
 
     return InboxHit(
         message_id=mid[:200],
@@ -275,6 +381,7 @@ def parse_message(raw: bytes) -> Optional[InboxHit]:
         title=title,
         confidence=min(conf, 0.99),
         raw_snippet=(body[:280] if body else subject),
+        kind=kind,
     )
 
 
@@ -295,13 +402,22 @@ def _imap_connect() -> imaplib.IMAP4_SSL:
 
 
 def _search_query(days: int) -> str:
-    # Gmail raw search is more reliable than nested IMAP OR trees
+    # Gmail raw search — applications + rejections / updates
     return (
         f'X-GM-RAW "newer_than:{days}d '
         f'(subject:\\"thank you for applying\\" OR '
+        f'subject:\\"thank you for your application\\" OR '
+        f'subject:\\"thanks for applying\\" OR '
         f'subject:\\"application received\\" OR '
         f'subject:\\"we received your application\\" OR '
         f'subject:\\"your application\\" OR '
+        f'subject:\\"regarding your application\\" OR '
+        f'subject:\\"update on your application\\" OR '
+        f'subject:\\"application update\\" OR '
+        f'subject:\\"not moving forward\\" OR '
+        f'subject:\\"out of consideration\\" OR '
+        f'subject:\\"unfortunately\\" OR '
+        f'subject:\\"Update -\\" OR '
         f'from:greenhouse OR from:ashbyhq OR from:lever.co OR '
         f'from:workday OR from:linkedin.com OR from:indeed.com OR from:wellfound)"'
     )
@@ -351,19 +467,29 @@ def _norm_company(s: str) -> str:
 def match_jobs_for_hit(hit: InboxHit) -> list[str]:
     if not hit.company:
         return []
-    target = _norm_company(hit.company)
+    target = db._norm_company_key(hit.company)
     if len(target) < 2:
         return []
     rows = db.list_jobs(limit=2000, order="updated_at DESC")
     matched: list[str] = []
     for r in rows:
-        if r.get("status") in ("applied", "skipped", "rejected", "closed"):
-            continue
-        c = _norm_company(r.get("company") or "")
+        st = r.get("status") or ""
+        notes = r.get("notes") or ""
+        if hit.kind == "rejected":
+            if st in ("skipped", "rejected", "closed"):
+                continue
+        else:
+            # applied receipt: skip terminal states unless recovering a bad inbox-reject
+            if st in ("skipped", "closed", "interview"):
+                continue
+            if st == "rejected" and "inbox-rejected" not in notes:
+                continue
+            if st == "applied" and "inbox-rejected" not in notes:
+                continue
+        c = db._norm_company_key(r.get("company") or "")
         if not c:
             continue
-        if target == c or target in c or c in target:
-            # Optional title soft-match boost; still mark company-level
+        if target == c or (len(target) >= 4 and (target in c or c in target)):
             matched.append(r["id"])
     return matched
 
@@ -374,14 +500,29 @@ def apply_inbox_hits(
     mark_applied: bool = True,
     min_confidence: float = 0.55,
 ) -> dict:
-    """Persist hits and optionally mark matching jobs as applied."""
+    """Persist hits; mark applied and/or rejected so companies leave the review queue."""
     saved = 0
-    marked = 0
+    marked_applied = 0
+    marked_rejected = 0
     companies: set[str] = set()
+    rejected_cos: set[str] = set()
     for hit in hits:
         if hit.confidence < min_confidence:
             continue
+        # Prefer title-matched jobs when we have a role hint
         job_ids = match_jobs_for_hit(hit)
+        if hit.title and job_ids:
+            titled = []
+            tnorm = re.sub(r"\W+", " ", hit.title.lower())
+            for jid in job_ids:
+                job = db.get_job(jid)
+                if not job:
+                    continue
+                jnorm = re.sub(r"\W+", " ", (job.get("title") or "").lower())
+                if any(tok in jnorm for tok in tnorm.split() if len(tok) > 3):
+                    titled.append(jid)
+            if titled:
+                job_ids = titled
         hit.matched_job_ids = job_ids
         db.upsert_inbox_hit(
             {
@@ -392,18 +533,56 @@ def apply_inbox_hits(
                 "company": hit.company,
                 "title": hit.title,
                 "confidence": hit.confidence,
-                "snippet": hit.raw_snippet,
+                "snippet": f"[{hit.kind}] {hit.raw_snippet}",
                 "matched_job_ids": job_ids,
             }
         )
         saved += 1
         if hit.company:
             companies.add(hit.company)
-            db.remember_applied_company(hit.company, source="inbox", title=hit.title)
-        if mark_applied and job_ids:
+            # Always remember — applied or rejected means don't re-queue
+            src = "inbox-rejected" if hit.kind == "rejected" else "inbox"
+            db.remember_applied_company(hit.company, source=src, title=hit.title)
+
+        if not mark_applied:
+            continue
+
+        if hit.kind == "rejected":
+            if hit.company:
+                rejected_cos.add(hit.company)
+            # Only reject title-matched jobs when possible; never spray whole ATS board
+            targets = job_ids
+            if hit.title and job_ids:
+                tnorm = re.sub(r"\W+", " ", hit.title.lower())
+                tight = []
+                for jid in job_ids:
+                    job = db.get_job(jid)
+                    if not job:
+                        continue
+                    jnorm = re.sub(r"\W+", " ", (job.get("title") or "").lower())
+                    tokens = [tok for tok in tnorm.split() if len(tok) > 3]
+                    if tokens and sum(1 for tok in tokens if tok in jnorm) >= max(1, len(tokens) // 2):
+                        tight.append(jid)
+                if tight:
+                    targets = tight
+            for jid in targets:
+                job = db.get_job(jid)
+                if not job or job.get("status") == JobStatus.REJECTED.value:
+                    continue
+                db.set_status(jid, JobStatus.REJECTED)
+                note = (job.get("notes") or "").strip()
+                extra = f"inbox-rejected: {hit.subject[:80]}"
+                if extra not in note:
+                    db.set_status_note(jid, f"{note}; {extra}".strip("; "))
+                marked_rejected += 1
+            # Company remembered above — parks remaining open packets via park_packets
+        else:
             for jid in job_ids:
                 job = db.get_job(jid)
-                if not job or job.get("status") == JobStatus.APPLIED.value:
+                if not job or job.get("status") in (
+                    JobStatus.APPLIED.value,
+                    JobStatus.REJECTED.value,
+                ):
                     continue
                 db.mark_sent(
                     jid,
@@ -416,11 +595,16 @@ def apply_inbox_hits(
                 extra = f"inbox-applied: {hit.company}"
                 if extra not in note:
                     db.set_status_note(jid, f"{note}; {extra}".strip("; "))
-                marked += 1
+                marked_applied += 1
+
+    parked = db.park_packets_at_applied_companies()
     return {
         "hits_saved": saved,
-        "jobs_marked": marked,
-        "companies": sorted(companies, key=str.lower),
+        "jobs_marked": marked_applied,
+        "jobs_rejected": marked_rejected,
+        "companies": sorted(c for c in companies if c),
+        "rejected_companies": sorted(c for c in rejected_cos if c),
+        "parked": parked,
     }
 
 
@@ -430,16 +614,28 @@ def scan_inbox(
     mark_applied: bool = True,
     dry_run: bool = False,
 ) -> dict:
-    console.print(f"[bold]Scanning inbox[/] for application receipts (last {days} days)…")
+    console.print(
+        f"[bold]Scanning inbox[/] for application + rejection emails (last {days} days)…"
+    )
     hits = fetch_application_emails(days=days, limit=limit)
-    console.print(f"Parsed [cyan]{len(hits)}[/] likely application emails")
+    applied_n = sum(1 for h in hits if h.kind == "applied")
+    rejected_n = sum(1 for h in hits if h.kind == "rejected")
+    console.print(
+        f"Parsed [cyan]{len(hits)}[/] emails "
+        f"([green]{applied_n}[/] applied · [yellow]{rejected_n}[/] rejected/out)"
+    )
     if dry_run:
-        for h in hits[:40]:
+        for h in hits[:50]:
             console.print(
-                f"  • {h.company or '?':<22} | {(h.title or '')[:40]:<40} | "
-                f"conf={h.confidence:.2f} | {h.subject[:60]}"
+                f"  • [{h.kind:<8}] {h.company or '?':<22} | {(h.title or '')[:36]:<36} | "
+                f"{h.subject[:55]}"
             )
-        if len(hits) > 40:
-            console.print(f"  … and {len(hits) - 40} more")
-        return {"hits": len(hits), "dry_run": True, "companies": sorted({h.company for h in hits if h.company})}
+        if len(hits) > 50:
+            console.print(f"  … and {len(hits) - 50} more")
+        return {
+            "hits": len(hits),
+            "dry_run": True,
+            "companies": sorted({h.company for h in hits if h.company}),
+            "rejected_companies": sorted({h.company for h in hits if h.kind == "rejected" and h.company}),
+        }
     return apply_inbox_hits(hits, mark_applied=mark_applied)
