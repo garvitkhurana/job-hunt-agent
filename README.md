@@ -1,17 +1,10 @@
 # Job Hunt Agent
 
-Personal look → apply agent for senior / founding PM (+ strong adjacent hybrid) roles.
+Personal **look → apply → measure** loop for senior / founding PM (+ strong adjacent hybrid) roles.
 
-Pulls public Greenhouse / Ashby boards, scores matches, blocks companies you’ve already applied to or been rejected from (via Gmail), and surfaces **one best role per company** on a local board.
+Pulls public Greenhouse / Ashby boards, scores matches, blocks companies you’ve already applied to or been rejected from (via Gmail), and surfaces **one best role per company** on a local board. Metrics tell you whether targeting is working.
 
-## What it does
-
-1. **Discover** roles from configured ATS boards (+ manual adds)
-2. **Score** against your profile (`data/profile.yaml` + `config.yaml`)
-3. **Inbox scan** — thank-you / rejection mail → block those companies
-4. **Board** — apply link + LinkedIn hiring-manager search + mark applied
-
-It is **not** a LinkedIn Easy Apply / auto-DM bot.
+It is **not** a LinkedIn Easy Apply / auto-DM / form-autofill bot.
 
 ## Setup
 
@@ -22,74 +15,91 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 
 cp .env.example .env   # or: hunt init
-# Edit .env — at minimum SMTP_USER + SMTP_PASS (Gmail app password) for inbox scan
+# Edit .env — SMTP_USER + SMTP_PASS (Gmail app password) for inbox scan
 ```
 
-Optional LLM keys in `.env` are only needed for legacy `hunt packets` / email generation — the daily look+apply loop does **not** require them. See `.env.example`.
+LLM keys (`ANTHROPIC_API_KEY`, etc.) are **only** for optional `hunt prep` — daily does not need them.
 
-## Daily ritual
+## Daily ritual (~15 min)
 
 ```bash
 source .venv/bin/activate
 
-hunt daily          # inbox → discover → score
-hunt ui             # local board (or: hunt board)
+hunt daily              # inbox → discover → score
+hunt ui                 # or: hunt board
+# apply / skip on the board → mark applied
+hunt metrics            # weekly: precision, applies, outcomes
+hunt metrics --baseline # once: write output/metrics/baseline.json
 ```
 
 On the board, per company:
 
-1. Open **Apply**
-2. Open **LinkedIn** (hiring-manager search) — paste your note yourself
-3. Click **mark applied** when done
+1. Open **Apply** (you submit on the ATS — CAPTCHA stays human)
+2. Open **LinkedIn** (search URL) — paste the note yourself
+3. **mark applied** or **skip** (logs metrics events)
+4. Optional: **prep** for on-demand materials (experimental)
+
+When you hear back:
+
+```bash
+hunt outcome <job_id> interview   # or: rejected | ghost
+```
 
 ## Commands
 
 | Command | Purpose |
 |---------|---------|
-| `hunt daily` | Full look+apply loop |
+| `hunt daily` | Inbox → discover → score |
 | `hunt ui` / `hunt board` | Local web / terminal board |
-| `hunt inbox` | Re-scan Gmail (applied + rejected) |
-| `hunt applied` | List blocked companies |
+| `hunt metrics` | Funnel KPIs (precision, applies/week, outcomes) |
+| `hunt outcome <id> …` | Log interview / rejected / ghost |
+| `hunt prep <id>` | On-demand materials (experimental; not daily) |
+| `hunt inbox` | Re-scan Gmail |
+| `hunt applied` | Blocked companies |
 | `hunt review` | Terminal queue (1 role / company) |
-| `hunt review --all-roles` | Every role (no company dedupe) |
-| `hunt suggest` | Adjacent-only list |
-| `hunt approve <id> --applied` | Mark applied |
-| `hunt skip <id>` | Skip a role |
-| `hunt add-job --company … --title … --url …` | Manual role |
-| `hunt status` | Pipeline counts |
-| `hunt packets` / `hunt send` | Optional legacy cover packets / SMTP |
+| `hunt skip` / `hunt approve --applied` | Mark from CLI |
+| `hunt add-job …` | Manual role |
+| `hunt legacy …` | Soft-deprecated packets / send / contacts |
+
+## What to optimize (in order)
+
+1. **Review precision** — applies / (applies + skips)
+2. **Applies / week** — throughput without spray
+3. **Interview rate / apply** — after you log outcomes
+
+Tune score knobs in `config.yaml` (`min_score`, `stretch_penalty`, `visa_priority_boost`, …) only after you have a baseline.
+
+## Phase 2 habit (no new features)
+
+Use the ritual for 1–2 weeks of real applies. Log outcomes. Glance `hunt metrics` weekly. **Do not** build form autofill or essay generators until this is habit. See [docs/NEXT.md](docs/NEXT.md).
 
 ## Targets & filters
 
 Configured in `config.yaml`:
 
-- **Seniority sweet spot:** Senior / Lead / Founding PM (Staff / Director / VP usually demoted)
-- **Locations:** visa-friendly boost for London / UK / Canada; also NYC, California, US remote
-- **One role per company** in review — highest score wins; `+N` = sibling roles at the same company
-- **Adjacent** (FDE, Applied AI, Solutions, …) kept only at strong companies
-
-Add boards under `sources.greenhouse_boards` / `sources.ashby_boards` (public ATS slugs).
+- Senior / Lead / Founding PM sweet spot (Staff / Director / VP demoted)
+- Visa boost: London / UK / Canada; also NYC, Cali, US remote
+- One best role per company; `+N` siblings
+- Adjacent roles only at strong companies
 
 ## Project layout
 
 | Path | Purpose |
 |------|---------|
-| `config.yaml` | Boards, targets, score thresholds |
+| `config.yaml` | Boards, filters, score knobs |
 | `data/profile.yaml` | Positioning |
-| `data/resume_master.md` | Master resume (optional packets) |
-| `data/hunt.db` | Tracker + applied companies (local, gitignored) |
-| `src/job_hunt/` | CLI, pipeline, inbox, scoring, UI |
-| `.env` | Secrets — never commit |
+| `data/hunt.db` | Jobs, applied cos, events (gitignored) |
+| `output/metrics/` | Baseline / snapshots |
+| `src/job_hunt/` | CLI, pipeline, inbox, scoring, UI, metrics |
 
 ## Tests
 
 ```bash
-pip install -e ".[dev]"
-pytest
+make test   # or: pytest -q
 ```
 
 ## Design constraints
 
-- No LinkedIn auto-DM / Easy Apply automation (ban risk)
-- Email cover packets / SMTP blast are optional legacy — off the happy path
-- Free LLM keys (NVIDIA NIM / OpenRouter) only for optional packet generation — see `.env.example`
+- No LinkedIn auto-DM / Easy Apply / Playwright submit
+- Form assist (defaults + narrative drafts) is **later** — see [docs/NEXT.md](docs/NEXT.md)
+- CAPTCHA, EEO invent, consent auto-yes: never automate
