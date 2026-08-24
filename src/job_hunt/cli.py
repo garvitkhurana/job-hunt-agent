@@ -11,7 +11,7 @@ from rich.table import Table
 from .config import ROOT, db_path, load_config
 from . import db
 from .models import JobStatus
-from .pipeline import run_daily, run_discover, run_packets, run_score
+from .pipeline import run_daily, run_discover, run_packets, run_rescore, run_score
 from .followup import process_due_followups
 
 app = typer.Typer(
@@ -104,9 +104,25 @@ def discover() -> None:
 
 @app.command()
 def score() -> None:
+    """Score newly discovered jobs only."""
     cfg = load_config()
     db.init_db()
     run_score(cfg)
+
+
+@app.command()
+def rescore() -> None:
+    """Re-score all open jobs so filter changes rewrite the board (fixes stale junk)."""
+    cfg = load_config()
+    db.init_db()
+    run_rescore(cfg)
+    review = db.queue_for_review(limit=20, one_per_company=True)
+    console.print(f"Review now: [green]{len(review)}[/] companies")
+    for r in review[:10]:
+        console.print(
+            f"  {r.get('score', 0):.2f} [{r.get('track') or 'core'}] "
+            f"{r['company']} — {r['title'][:55]}"
+        )
 
 
 @legacy_app.command("packets")

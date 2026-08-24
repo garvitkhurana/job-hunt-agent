@@ -10,6 +10,14 @@ from .models import JobStatus
 
 console = Console()
 
+# Open statuses that must be rewritten when match rules change
+_OPEN_FOR_RESCORE = (
+    JobStatus.DISCOVERED,
+    JobStatus.SCORED,
+    JobStatus.PACKET_READY,
+    JobStatus.QUEUED,
+)
+
 
 def run_discover(cfg: AppConfig) -> list:
     boards_gh = list(dict.fromkeys(cfg.sources.greenhouse_boards + cfg.sources.extra_greenhouse))
@@ -28,15 +36,58 @@ def run_discover(cfg: AppConfig) -> list:
     return jobs
 
 
-def run_score(cfg: AppConfig, jobs: list | None = None) -> list[tuple]:
-    if jobs is None:
-        rows = db.list_jobs(status=JobStatus.DISCOVERED, limit=500)
-        jobs = [db.job_from_row(r) for r in rows]
+def _jobs_for_score(jobs: list | None, *, all_open: bool) -> list:
+    if jobs is not None:
+        return jobs
+    if all_open:
+        seen: set[str] = set()
+        out = []
+        for st in _OPEN_FOR_RESCORE:
+            for r in db.list_jobs(status=st, limit=5000, order="updated_at DESC"):
+                if r["id"] in seen:
+                    continue
+                seen.add(r["id"])
+                out.append(db.job_from_row(r))
+        return out
+    rows = db.list_jobs(status=JobStatus.DISCOVERED, limit=500)
+    return [db.job_from_row(r) for r in rows]
+
+
+def run_score(
+    cfg: AppConfig,
+    jobs: list | None = None,
+    *,
+    all_open: bool = False,
+) -> list[tuple]:
+    """Score jobs. Zero totals → skipped. Never revives applied/skipped via update_score."""
+    jobs = _jobs_for_score(jobs, all_open=all_open)
     scored = []
+    zeroed = 0
     for job in jobs:
+        existing = db.get_job(job.id)
+        cur = (existing or {}).get("status")
+        if cur in (
+            JobStatus.APPLIED.value,
+            JobStatus.OUTREACH_SENT.value,
+            JobStatus.FOLLOWUP_DUE.value,
+            JobStatus.FOLLOWUP_SENT.value,
+            JobStatus.REPLIED.value,
+            JobStatus.INTERVIEW.value,
+            JobStatus.REJECTED.value,
+            JobStatus.CLOSED.value,
+            JobStatus.APPROVED.value,
+        ):
+            continue
         breakdown = score_job(job, cfg)
         db.upsert_job(job)
-        db.update_score(job.id, breakdown.total, breakdown.model_dump(), status=JobStatus.SCORED)
+        if breakdown.total <= 0:
+            status = JobStatus.SKIPPED
+            zeroed += 1
+        elif cur in (JobStatus.PACKET_READY.value, JobStatus.QUEUED.value):
+            status = JobStatus(cur)
+        else:
+            status = JobStatus.SCORED
+        db.update_score(job.id, breakdown.total, breakdown.model_dump(), status=status)
         scored.append((job, breakdown))
     scored.sort(key=lambda x: x[1].total, reverse=True)
     above = [
@@ -50,8 +101,16 @@ def run_score(cfg: AppConfig, jobs: list | None = None) -> list[tuple]:
     console.print(
         f"Scored {len(scored)} · qualifying: [green]{len(above)}[/] "
         f"([cyan]{core_n}[/] core PM, [magenta]{adj_n}[/] adjacent)"
+        + (f" · zeroed/skipped [yellow]{zeroed}[/]" if zeroed else "")
     )
     return above
+
+
+def run_rescore(cfg: AppConfig | None = None) -> list[tuple]:
+    """Re-score every open job so rule changes rewrite stale board scores."""
+    cfg = cfg or load_config()
+    console.print("[bold]Rescoring[/] all open jobs (discovered/scored/packet_ready/queued)…")
+    return run_score(cfg, all_open=True)
 
 
 def run_packets(cfg: AppConfig, limit: int | None = None, use_llm: bool = True) -> int:
@@ -128,7 +187,7 @@ def run_daily(
     use_llm: bool = True,  # kept for CLI compat; ignored — no LLM in daily
     skip_inbox: bool = False,
 ) -> None:
-    """Look+apply loop: inbox → discover → score → board (no LLM packets)."""
+    """Look+apply loop: inbox → discover → rescore all open → board (no LLM packets)."""
     import time
 
     _ = use_llm
@@ -138,12 +197,13 @@ def run_daily(
     if not skip_inbox:
         run_inbox_scan()
     jobs = run_discover(cfg)
-    above = run_score(cfg, jobs)
+    # Rescore every open row so hard-exclude / geo rule changes rewrite the board
+    above = run_rescore(cfg)
     skipped_applied = sum(1 for j, _ in above if db.is_company_already_applied(j.company))
     if skipped_applied:
         console.print(f"Skipped [yellow]{skipped_applied}[/] roles at already-applied companies")
 
-    # One best role per company across core + adjacent
+    # One best role per company — core preferred over adjacent
     review = db.queue_for_review(limit=cfg.daily.app_target + cfg.daily.adjacent_target, one_per_company=True)
     core_n = sum(1 for r in review if (r.get("track") or "core") == "core")
     adj_n = len(review) - core_n

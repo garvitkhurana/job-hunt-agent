@@ -61,7 +61,7 @@ def snapshot() -> dict:
         r["prepped"] = int(r.get("prepped") or 0)
     applied_cos = db.list_applied_companies(limit=100)
     applied_jobs = db.list_jobs(status=JobStatus.APPLIED, limit=30, order="updated_at DESC")
-    suggestions = db.suggestions(limit=10, min_score=0.66)
+    suggestions = db.suggestions(limit=10, min_score=0.78)
     from .metrics import compute_metrics
 
     m = compute_metrics(7)

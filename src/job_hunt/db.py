@@ -189,9 +189,37 @@ def upsert_job(job: Job, score: float = 0.0, score_json: dict | None = None, sta
             )
 
 
+# Statuses that scoring must never overwrite back to scored/packet_ready
+_SCORE_PROTECTED = frozenset(
+    {
+        JobStatus.APPLIED.value,
+        JobStatus.OUTREACH_SENT.value,
+        JobStatus.FOLLOWUP_DUE.value,
+        JobStatus.FOLLOWUP_SENT.value,
+        JobStatus.REPLIED.value,
+        JobStatus.INTERVIEW.value,
+        JobStatus.REJECTED.value,
+        JobStatus.SKIPPED.value,
+        JobStatus.CLOSED.value,
+        JobStatus.APPROVED.value,
+    }
+)
+
+
 def update_score(job_id: str, score: float, breakdown: dict, status: JobStatus = JobStatus.SCORED) -> None:
+    """Persist score. Zero → skipped. Never revive applied/skipped/rejected to scored."""
     now = datetime.utcnow().isoformat()
+    if score <= 0:
+        score = 0.0
+        status = JobStatus.SKIPPED
     with connect() as conn:
+        row = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        current = row["status"] if row else None
+        if current in _SCORE_PROTECTED:
+            # Keep terminal / skipped status; still refresh score metadata
+            status_value = current
+        else:
+            status_value = status.value
         conn.execute(
             """
             UPDATE jobs SET score=?, score_json=?, status=?, updated_at=?,
@@ -201,7 +229,7 @@ def update_score(job_id: str, score: float, breakdown: dict, status: JobStatus =
             (
                 score,
                 json.dumps(breakdown),
-                status.value,
+                status_value,
                 now,
                 breakdown.get("track", "core"),
                 breakdown.get("role_family", ""),
@@ -306,17 +334,28 @@ def queue_for_review(
     limit: int = 50,
     track: str | None = None,
     one_per_company: bool = True,
+    prefer_core: bool = True,
 ) -> list[dict]:
-    """Scored / ready roles for look+apply. Default: one best role per company (core or adjacent)."""
+    """Scored / ready roles for look+apply. Default: one best role per company (core preferred)."""
+    from .config import load_config
+    from .match.roles import is_hard_excluded
+
+    cfg = load_config()
+    min_core = cfg.filters.min_score
+    min_adj = cfg.filters.min_adjacent_score
+    floor = min(min_core, min_adj)
+
     clause = "AND track = ?" if track else ""
-    params: list[Any] = [track] if track else []
-    params.append(max(limit * 30, 400))
+    params: list[Any] = [floor]
+    if track:
+        params.append(track)
+    params.append(max(limit * 40, 500))
     with connect() as conn:
         rows = conn.execute(
             f"""
             SELECT * FROM jobs
             WHERE status IN ('scored', 'packet_ready', 'queued')
-              AND score > 0
+              AND score >= ?
               {clause}
             ORDER BY score DESC, company_score DESC, updated_at DESC
             LIMIT ?
@@ -324,29 +363,56 @@ def queue_for_review(
             params,
         ).fetchall()
 
-        sibling_counts: dict[str, int] = {}
-        for r in rows:
-            if is_company_already_applied(r["company"]):
-                continue
-            key = _norm_company_key(r["company"])
-            sibling_counts[key] = sibling_counts.get(key, 0) + 1
+    eligible: list[dict] = []
+    for r in rows:
+        row = dict(r)
+        if is_company_already_applied(row["company"]):
+            continue
+        if is_hard_excluded(row.get("title") or ""):
+            continue
+        t = row.get("track") or "core"
+        need = min_adj if t == "adjacent" else min_core
+        if (row.get("score") or 0) < need:
+            continue
+        if track and t != track:
+            continue
+        eligible.append(row)
 
-        out: list[dict] = []
-        seen_companies: set[str] = set()
-        for r in rows:
-            if is_company_already_applied(r["company"]):
-                continue
-            key = _norm_company_key(r["company"])
-            if one_per_company and key in seen_companies:
-                continue
-            if one_per_company:
-                seen_companies.add(key)
-            row = dict(r)
-            row["sibling_roles"] = max(0, sibling_counts.get(key, 1) - 1)
-            out.append(row)
+    sibling_counts: dict[str, int] = {}
+    for r in eligible:
+        key = _norm_company_key(r["company"])
+        sibling_counts[key] = sibling_counts.get(key, 0) + 1
+
+    if not one_per_company:
+        out = []
+        for r in eligible:
+            r = dict(r)
+            r["sibling_roles"] = max(0, sibling_counts.get(_norm_company_key(r["company"]), 1) - 1)
+            out.append(r)
             if len(out) >= limit:
                 break
         return out
+
+    # Prefer core over adjacent when both exist at a company
+    by_co: dict[str, list[dict]] = {}
+    for r in eligible:
+        key = _norm_company_key(r["company"])
+        by_co.setdefault(key, []).append(r)
+
+    picks: list[dict] = []
+    for key, roles in by_co.items():
+        if prefer_core and not track:
+            cores = [x for x in roles if (x.get("track") or "core") == "core"]
+            pool = cores or roles
+        else:
+            pool = roles
+        best = max(pool, key=lambda x: (x.get("score") or 0, x.get("company_score") or 0))
+        best = dict(best)
+        best["sibling_roles"] = max(0, sibling_counts.get(key, 1) - 1)
+        picks.append(best)
+
+    picks.sort(key=lambda x: (-(x.get("score") or 0), -(x.get("company_score") or 0)))
+    return picks[:limit]
 
 
 def company_sibling_roles(company: str, exclude_job_id: str | None = None, limit: int = 20) -> list[dict]:

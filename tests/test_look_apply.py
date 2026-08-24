@@ -157,3 +157,143 @@ def test_fetch_ashby_mocked():
     assert len(jobs) == 1
     assert jobs[0].source == JobSource.ASHBY
     assert "agent" in jobs[0].description
+
+
+def test_japan_remote_and_sales_ops_excluded():
+    from job_hunt.config import load_config
+    from job_hunt.match import score_job
+    from job_hunt.match.roles import is_hard_excluded
+
+    cfg = load_config()
+    assert is_hard_excluded("Senior Sales Strategy & Operations Manager - APJ")
+    assert is_hard_excluded("Head of Global Sales Enablement and AI Adoption")
+    assert is_hard_excluded("Sales Engineer, Enterprise")
+    assert is_hard_excluded("Customer Success Manager")
+
+    japan = Job(
+        id="jp1",
+        source=JobSource.MANUAL,
+        company="Dropbox",
+        title="Senior Product Manager",
+        location="Remote - Japan",
+        url="https://x",
+        description="Product role",
+        remote=True,
+    )
+    b = score_job(japan, cfg)
+    assert b.total == 0.0
+    assert any("excluded_geo" in r for r in b.reasons)
+
+    apj = Job(
+        id="apj1",
+        source=JobSource.MANUAL,
+        company="Dropbox",
+        title="Senior Product Manager APJ",
+        location="Remote",
+        url="https://x",
+        remote=True,
+    )
+    assert score_job(apj, cfg).total == 0.0
+
+    anz = Job(
+        id="anz1",
+        source=JobSource.MANUAL,
+        company="Stripe",
+        title="Senior Product Manager - ANZ",
+        location="Remote",
+        url="https://x",
+        remote=True,
+    )
+    assert score_job(anz, cfg).total == 0.0
+
+
+def test_rescore_zeros_stale_hard_excluded(tmp_path, monkeypatch):
+    from job_hunt.config import load_config
+    from job_hunt.pipeline import run_rescore
+
+    db_path = tmp_path / "rescore.db"
+    monkeypatch.setattr(db, "db_path", lambda: db_path)
+    db.init_db()
+
+    junk = Job(
+        id="junk1",
+        source=JobSource.MANUAL,
+        company="Dropbox",
+        title="Senior Sales Strategy & Operations Manager - APJ (Remote)",
+        location="Japan",
+        url="https://x",
+        remote=True,
+    )
+    good = Job(
+        id="good1",
+        source=JobSource.MANUAL,
+        company="Notion",
+        title="Senior Product Manager, AI",
+        location="New York, NY",
+        url="https://x",
+        description="AI LLM platform product",
+    )
+    db.upsert_job(junk, score=0.789, status=JobStatus.SCORED)
+    db.update_score(
+        "junk1",
+        0.789,
+        {"total": 0.789, "track": "adjacent", "company_score": 1.0},
+        status=JobStatus.SCORED,
+    )
+    # Force status back to scored in case update_score would skip (fresh insert path)
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET status='scored', score=0.789, track='adjacent' WHERE id='junk1'"
+        )
+
+    db.upsert_job(good, score=0.9, status=JobStatus.SCORED)
+    with db.connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET status='scored', score=0.9, track='core' WHERE id='good1'"
+        )
+
+    cfg = load_config()
+    run_rescore(cfg)
+
+    junk_row = db.get_job("junk1")
+    assert junk_row is not None
+    assert junk_row["score"] == 0.0
+    assert junk_row["status"] == "skipped"
+
+    review = db.queue_for_review(limit=20, one_per_company=True)
+    assert not any(r["id"] == "junk1" for r in review)
+    assert not any("Sales Strategy" in (r.get("title") or "") for r in review)
+
+
+def test_update_score_does_not_revive_skipped(tmp_path, monkeypatch):
+    db_path = tmp_path / "revive.db"
+    monkeypatch.setattr(db, "db_path", lambda: db_path)
+    db.init_db()
+    job = Job(id="s1", source=JobSource.MANUAL, company="X", title="Senior PM", url="https://x")
+    db.upsert_job(job, status=JobStatus.SKIPPED)
+    db.set_status("s1", JobStatus.SKIPPED)
+    db.update_score("s1", 0.95, {"total": 0.95, "track": "core"}, status=JobStatus.SCORED)
+    row = db.get_job("s1")
+    assert row["status"] == "skipped"
+
+
+def test_core_preferred_over_higher_adjacent(tmp_path, monkeypatch):
+    db_path = tmp_path / "corepref.db"
+    monkeypatch.setattr(db, "db_path", lambda: db_path)
+    db.init_db()
+
+    def add(jid, company, title, score, track):
+        job = Job(id=jid, source=JobSource.MANUAL, company=company, title=title, url="https://x")
+        db.upsert_job(job, score=score, status=JobStatus.SCORED)
+        with db.connect() as conn:
+            conn.execute(
+                "UPDATE jobs SET score=?, status='scored', track=? WHERE id=?",
+                (score, track, jid),
+            )
+
+    add("c1", "Linear", "Senior Product Manager", 0.70, "core")
+    add("a1", "Linear", "Forward Deployed Engineer", 0.95, "adjacent")
+    rows = db.queue_for_review(limit=10, one_per_company=True)
+    linear = next(r for r in rows if r["company"] == "Linear")
+    assert linear["title"] == "Senior Product Manager"
+    assert linear["track"] == "core"

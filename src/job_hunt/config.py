@@ -38,14 +38,14 @@ class FiltersConfig(BaseModel):
     # Adjacent (non-PM) roles are only surfaced at companies at/above this quality score
     include_adjacent_roles: bool = True
     min_company_tier: float = 0.75
-    min_adjacent_score: float = 0.66
+    min_adjacent_score: float = 0.78
     # Tuning knobs for metrics-driven optimization
     stretch_penalty: float = 0.72
     stretch_min_score: float = 0.78
     visa_priority_boost: float = 0.08
     founding_boost: float = 0.07
     ai_title_boost: float = 0.05
-    adjacent_track_mult: float = 0.92
+    adjacent_track_mult: float = 0.88
 
 
 class DailyConfig(BaseModel):

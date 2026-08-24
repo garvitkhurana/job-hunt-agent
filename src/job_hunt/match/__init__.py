@@ -12,7 +12,8 @@ SENIOR_SWEET_SPOT = [
     r"\bsenior\b",
     r"\bsr\.?\b",
     r"\bfounding\b",
-    r"\blead\b",
+    r"\bproduct\s+lead\b",
+    r"\bengineering\s+lead\b",
     r"\bmanager\s+ii\b",
     r"\bproduct\s+manager\b",  # untitled PM still in-band
 ]
@@ -52,8 +53,27 @@ BLOCKED_GEOS = (
     "gurgaon",
     "sydney",
     "melbourne",
+    "australia",
+    "japan",
+    "japanese",
     "tokyo",
+    "osaka",
+    "apj",
+    "apac",  # APAC-only roles; US/UK/Canada remotes usually say US/UK/Canada
+    "anz",
+    "aunz",
+    "asia pacific",
+    "asia-pacific",
+    "latam",
     "seoul",
+    "korea",
+    "taiwan",
+    "hong kong",
+    "indonesia",
+    "philippines",
+    "thailand",
+    "vietnam",
+    "malaysia",
     "berlin",
     "munich",
     "amsterdam",
@@ -115,13 +135,14 @@ def _any_match(patterns: List[str], text: str) -> bool:
 
 def _location_fit(loc_blob: str, remote: bool, allowed: List[str]) -> Tuple[float, List[str]]:
     reasons: List[str] = []
+    # Blocked geos win even when the posting says "Remote - Japan"
+    if any(b in loc_blob for b in BLOCKED_GEOS):
+        return 0.0, ["excluded_geo"]
+
     for allow in allowed:
         needles = GEO_ALIASES.get(allow.lower(), (allow.lower(),))
         if any(n and n in loc_blob for n in needles):
             return 1.0, [f"location:{allow}"]
-
-    if any(b in loc_blob for b in BLOCKED_GEOS):
-        return 0.0, ["excluded_geo"]
 
     if remote or "remote" in loc_blob or "anywhere" in loc_blob:
         reasons.append("remote_ok")
