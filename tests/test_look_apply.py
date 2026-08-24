@@ -74,7 +74,7 @@ def test_queue_one_per_company_and_applied_filter(tmp_path, monkeypatch):
             conn.execute("UPDATE jobs SET track=? WHERE id=?", (track, jid))
 
     add("a1", "Figma", "PM Design", 1.0, "core")
-    add("a2", "Figma", "Forward Deployed Engineer", 0.95, "adjacent")
+    add("a2", "Figma", "Senior Product Manager, AI", 0.95, "core")
     add("b1", "Brex", "Senior PM AI", 0.99, "core")
     add("c1", "Anthropic", "PM", 1.0, "core")
     db.remember_applied_company("Anthropic", source="inbox")
@@ -153,10 +153,69 @@ def test_fetch_ashby_mocked():
         ]
     }
     with patch("job_hunt.discover._get_json", return_value=payload):
+        from job_hunt.discover import fetch_ashby
+
         jobs = fetch_ashby("linear")
     assert len(jobs) == 1
     assert jobs[0].source == JobSource.ASHBY
     assert "agent" in jobs[0].description
+
+
+def test_discover_skips_applied_and_round_robins():
+    from job_hunt.discover import discover_all
+    from job_hunt.models import Job, JobSource
+
+    def fake_gh(board: str):
+        # Each board returns more than max_total if taken greedily
+        return [
+            Job(
+                id=f"gh-{board}-{i}",
+                source=JobSource.GREENHOUSE,
+                company=board.title(),
+                title=f"Senior Product Manager {i}",
+                url=f"https://x/{board}/{i}",
+                location="New York",
+            )
+            for i in range(30)
+        ]
+
+    with patch("job_hunt.discover.fetch_greenhouse", side_effect=fake_gh):
+        with patch("job_hunt.discover.fetch_ashby", return_value=[]):
+            with patch("job_hunt.discover.fetch_yc_jobs", return_value=[]):
+                jobs = discover_all(
+                    greenhouse_boards=["stripe", "notion", "ramp"],
+                    ashby_boards=[],
+                    yc_enabled=False,
+                    max_total=9,
+                    per_board=30,
+                    skip_company_keys={"stripe"},
+                )
+    cos = {j.company.lower() for j in jobs}
+    assert "stripe" not in cos
+    assert "notion" in cos and "ramp" in cos
+    # Round-robin should include both unapplied boards, not 9 from Notion only
+    assert sum(1 for j in jobs if j.company.lower() == "notion") <= 5
+    assert sum(1 for j in jobs if j.company.lower() == "ramp") <= 5
+
+
+def test_purge_junk_applied(tmp_path, monkeypatch):
+    db_path = tmp_path / "junk.db"
+    monkeypatch.setattr(db, "db_path", lambda: db_path)
+    db.init_db()
+    db.remember_applied_company("Stripe", source="inbox")
+    with db.connect() as conn:
+        conn.execute(
+            "INSERT INTO applied_companies (company_norm, company, title, source, first_seen_at, last_seen_at) "
+            "VALUES ('career','career','','inbox','t','t')"
+        )
+        conn.execute(
+            "INSERT INTO applied_companies (company_norm, company, title, source, first_seen_at, last_seen_at) "
+            "VALUES ('llamaindex was received','LlamaIndex was received','','inbox','t','t')"
+        )
+    n = db.purge_junk_applied_companies()
+    assert n >= 2
+    assert db.is_company_already_applied("Stripe")
+    assert not db.is_company_already_applied("career")
 
 
 def test_japan_remote_and_sales_ops_excluded():
@@ -169,6 +228,7 @@ def test_japan_remote_and_sales_ops_excluded():
     assert is_hard_excluded("Head of Global Sales Enablement and AI Adoption")
     assert is_hard_excluded("Sales Engineer, Enterprise")
     assert is_hard_excluded("Customer Success Manager")
+    assert is_hard_excluded("Founding / Senior Product Manager (explore)")
 
     japan = Job(
         id="jp1",
@@ -293,7 +353,8 @@ def test_core_preferred_over_higher_adjacent(tmp_path, monkeypatch):
 
     add("c1", "Linear", "Senior Product Manager", 0.70, "core")
     add("a1", "Linear", "Forward Deployed Engineer", 0.95, "adjacent")
-    rows = db.queue_for_review(limit=10, one_per_company=True)
+    # Explicit track=None: prefer core when both tracks present
+    rows = db.queue_for_review(limit=10, track=None, one_per_company=True, prefer_core=True)
     linear = next(r for r in rows if r["company"] == "Linear")
     assert linear["title"] == "Senior Product Manager"
     assert linear["track"] == "core"

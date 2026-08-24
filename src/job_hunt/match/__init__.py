@@ -183,6 +183,14 @@ def score_job(job: Job, cfg: AppConfig) -> ScoreBreakdown:
         role_key = family.key
         reasons.append(f"role:{family.key}")
 
+    if track == "adjacent" and not cfg.filters.include_adjacent_roles:
+        return ScoreBreakdown(
+            total=0.0,
+            track=track,
+            role_family=role_key,
+            reasons=reasons + ["adjacent_disabled"],
+        )
+
     tier_score, tier, tier_reasons = company_tier(job.company, job.description, is_yc=is_yc)
     reasons.extend(f"company:{r}" for r in tier_reasons)
 

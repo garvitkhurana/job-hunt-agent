@@ -36,7 +36,7 @@ class FiltersConfig(BaseModel):
     exclude_keywords: List[str] = Field(default_factory=list)
     prefer_keywords: List[str] = Field(default_factory=list)
     # Adjacent (non-PM) roles are only surfaced at companies at/above this quality score
-    include_adjacent_roles: bool = True
+    include_adjacent_roles: bool = False
     min_company_tier: float = 0.75
     min_adjacent_score: float = 0.78
     # Tuning knobs for metrics-driven optimization

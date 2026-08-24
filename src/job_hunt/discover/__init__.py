@@ -161,13 +161,20 @@ def fetch_yc_jobs(limit: int = 100) -> list[Job]:
 
 
 def _is_relevant(title: str, include_adjacent: bool = True) -> bool:
-    """Keep core PM titles plus, optionally, adjacent families that fit a PM/eng hybrid."""
+    """Keep core PM titles plus, optionally, adjacent families that fit a PM/engineer hybrid."""
     family = classify(title)
     if family is None:
         return False
     if family.track == "adjacent" and not include_adjacent:
         return False
     return True
+
+
+def _board_to_company_key(board: str) -> str:
+    """Normalize ATS board slug for applied-company matching."""
+    from ..db import _norm_company_key
+
+    return _norm_company_key((board or "").replace("-", " ").replace("_", " "))
 
 
 def discover_all(
@@ -177,40 +184,58 @@ def discover_all(
     max_total: int = 250,
     per_board: int = 40,
     include_adjacent: bool = True,
+    skip_company_keys: set[str] | None = None,
 ) -> list[Job]:
-    seen: set[str] = set()
-    seen_roles: set = set()
-    out: list[Job] = []
+    """Fetch roles across boards.
 
-    def add(jobs: list[Job]) -> None:
-        kept = 0
-        for job in jobs:
-            if job.source != JobSource.YC and not _is_relevant(job.title, include_adjacent):
-                continue
-            if job.id in seen:
-                continue
-            # Boards often list one role once per office; collapse to a single entry
-            role_key = (job.company.lower(), re.sub(r"[^a-z0-9]+", "", job.title.lower()))
-            if role_key in seen_roles:
-                continue
-            seen.add(job.id)
-            seen_roles.add(role_key)
-            out.append(job)
-            kept += 1
-            if kept >= per_board or len(out) >= max_total:
-                return
+    Skips boards for already-applied companies and round-robins so early
+    boards (Stripe, etc.) cannot starve the rest of the list.
+    """
+    skip = {k for k in (skip_company_keys or set()) if k}
+    gh_all = list(greenhouse_boards)
+    ash_all = list(ashby_boards)
+    gh = [b for b in gh_all if _board_to_company_key(b) not in skip]
+    ash = [b for b in ash_all if _board_to_company_key(b) not in skip]
 
-    for board in greenhouse_boards:
-        add(fetch_greenhouse(board))
-        if len(out) >= max_total:
-            return out
-
-    for board in ashby_boards:
-        add(fetch_ashby(board))
-        if len(out) >= max_total:
-            return out
-
+    # Prefetch per board (capped), then round-robin into out
+    buckets: list[list[Job]] = []
+    for board in gh:
+        raw = fetch_greenhouse(board)
+        kept = [j for j in raw if _is_relevant(j.title, include_adjacent)][:per_board]
+        if kept:
+            buckets.append(kept)
+    for board in ash:
+        raw = fetch_ashby(board)
+        kept = [j for j in raw if _is_relevant(j.title, include_adjacent)][:per_board]
+        if kept:
+            buckets.append(kept)
     if yc_enabled:
-        add(fetch_yc_jobs(limit=80))
+        yc = fetch_yc_jobs(limit=min(80, per_board * 2))
+        if yc:
+            buckets.append(yc)
 
+    seen: set[str] = set()
+    seen_roles: set[tuple[str, str]] = set()
+    out: list[Job] = []
+    idx = [0] * len(buckets)
+    while len(out) < max_total and buckets:
+        progress = False
+        for bi, bucket in enumerate(buckets):
+            if len(out) >= max_total:
+                break
+            while idx[bi] < len(bucket):
+                job = bucket[idx[bi]]
+                idx[bi] += 1
+                if job.id in seen:
+                    continue
+                role_key = (job.company.lower(), re.sub(r"[^a-z0-9]+", "", job.title.lower()))
+                if role_key in seen_roles:
+                    continue
+                seen.add(job.id)
+                seen_roles.add(role_key)
+                out.append(job)
+                progress = True
+                break
+        if not progress:
+            break
     return out

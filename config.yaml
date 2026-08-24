@@ -48,7 +48,7 @@ candidate:
 
 filters:
   min_score: 0.62
-  include_adjacent_roles: true
+  include_adjacent_roles: false
   min_company_tier: 0.75
   min_adjacent_score: 0.78
   # Metrics knobs — tune, then hunt metrics
@@ -64,6 +64,7 @@ filters:
     - junior
     - entry level
     - associate pm
+    - new grad
   prefer_keywords:
     - senior
     - founding
@@ -73,10 +74,10 @@ filters:
     - platform
 
 daily:
-  app_target: 30
-  outreach_target: 40
-  adjacent_target: 15
-  max_discover: 300
+  app_target: 25
+  outreach_target: 0
+  adjacent_target: 0
+  max_discover: 500
 
 followup:
   cadence_days: [3, 7, 14]
@@ -179,7 +180,7 @@ sources:
     - cohere
   # Companies from your list with no reliable public GH/Ashby slug (add when known):
   # deepmind, ssi / safe-superintelligence, physical-intelligence, waymo, a24, turbopuffer
-  yc_enabled: true
+  yc_enabled: false  # synthetic explore cards pollute the board; use real ATS only
 
 generation:
   tone: confident, specific, founder-friendly, no fluff

@@ -11,57 +11,18 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import db
-from .contacts import linkedin_people_search, target_personas
-from .models import Job, JobSource, JobStatus
+from .models import JobStatus
 
 console = Console()
 DEFAULT_PORT = 8765
-
-LI_NOTE = (
-    "Hi — Product Lead on BlackRock's AI Accelerator (RAG platform, +40% bond TTM). "
-    "Curious about {title} at {company}. Open to a quick chat?"
-)
-
-
-def _job_from_row(r: dict) -> Job:
-    return Job(
-        id=r["id"],
-        source=JobSource(r.get("source") or "other"),
-        company=r["company"],
-        title=r["title"],
-        location=r.get("location") or "",
-        url=r.get("url") or "",
-        description=(r.get("description") or "")[:500],
-    )
-
-
-def linkedin_url_for_row(r: dict) -> str:
-    try:
-        job = _job_from_row(r)
-        personas = target_personas(job)
-        titles = personas[0].titles if personas else ["Head of Product", "VP Product"]
-        return linkedin_people_search(r["company"], titles)
-    except Exception:
-        return linkedin_people_search(r["company"], ["Head of Product", "VP Product"])
-
-
-def note_for_row(r: dict) -> str:
-    return LI_NOTE.format(title=r.get("title") or "the role", company=r.get("company") or "your team")[
-        :280
-    ]
 
 
 def snapshot() -> dict:
     db.init_db()
     stats = db.stats()
-    review = db.queue_for_review(limit=25, one_per_company=True)
-    for r in review:
-        r["linkedin_url"] = linkedin_url_for_row(r)
-        r["linkedin_note"] = note_for_row(r)
-        r["prepped"] = int(r.get("prepped") or 0)
+    # Core PM only — one best role per unapplied company
+    review = db.queue_for_review(limit=25, track="core", one_per_company=True)
     applied_cos = db.list_applied_companies(limit=100)
-    applied_jobs = db.list_jobs(status=JobStatus.APPLIED, limit=30, order="updated_at DESC")
-    suggestions = db.suggestions(limit=10, min_score=0.78)
     from .metrics import compute_metrics
 
     m = compute_metrics(7)
@@ -69,16 +30,13 @@ def snapshot() -> dict:
     return {
         "stats": stats,
         "review": review,
-        "suggestions": suggestions,
         "applied_companies": applied_cos,
-        "applied_jobs": applied_jobs,
         "metrics": m,
         "totals": {
             "applied_companies": len(applied_cos),
             "review_companies": len(review),
             "scored": stats.get("scored", 0),
             "applied_jobs": stats.get("applied", 0),
-            "suggestions": len([s for s in suggestions if (s.get("track") or "") == "adjacent"]),
             "precision_7d": f.get("review_precision"),
             "applies_7d": f.get("applies", 0),
             "skips_7d": f.get("skips", 0),
@@ -106,31 +64,32 @@ def render_html(data: dict) -> str:
     review_rows = "".join(
         f"<tr>"
         f"<td class='num'>{r.get('score', 0):.2f}</td>"
-        f"<td>{_esc(r.get('track') or 'core')}</td>"
-        f"<td><strong>{_esc(r['company'])}</strong>"
-        f"{' <span class=dim>· prepped</span>' if r.get('prepped') else ''}</td>"
-        f"<td>{_esc(r['title'][:52])}</td>"
-        f"<td>{_esc((r.get('location') or '')[:24])}</td>"
+        f"<td><strong>{_esc(r['company'])}</strong></td>"
+        f"<td>{_esc(r['title'][:64])}</td>"
+        f"<td>{_esc((r.get('location') or '')[:36])}</td>"
         f"<td class='dim'>{'+' + str(r['sibling_roles']) if r.get('sibling_roles') else ''}</td>"
         f"<td class='actions'>"
         f"<a href='{_esc(r.get('url'))}' target='_blank' rel='noopener'>Apply</a> · "
-        f"<a href='{_esc(r.get('linkedin_url'))}' target='_blank' rel='noopener'>LinkedIn</a><br/>"
         f"<a class='btn' href='/action?op=applied&id={_esc(r['id'])}'>mark applied</a> "
-        f"<a class='btn ghost' href='/action?op=skip&id={_esc(r['id'])}'>skip</a> "
-        f"<a class='btn ghost' href='/action?op=prep&id={_esc(r['id'])}'>prep</a>"
+        f"<a class='btn ghost' href='/action?op=skip&id={_esc(r['id'])}'>skip</a>"
         f"</td></tr>"
-        f"<tr class='note'><td colspan='7'><span class='dim'>Note:</span> {_esc(r.get('linkedin_note'))}</td></tr>"
         for r in data["review"]
-    ) or "<tr><td colspan='7' class='dim'>Empty — run hunt daily</td></tr>"
+    ) or (
+        "<tr><td colspan='6' class='dim'>"
+        "No core PM roles at unapplied companies. Run <code>hunt daily</code> or add boards."
+        "</td></tr>"
+    )
 
     applied_cos = "".join(
         f"<tr><td>{_esc(r['company'])}</td><td class='dim'>{_esc(r.get('source'))}</td></tr>"
         for r in data["applied_companies"]
     ) or "<tr><td colspan='2' class='dim'>None yet</td></tr>"
 
-    live_stats = {k: v for k, v in sorted(data["stats"].items(), key=lambda x: -x[1]) if k in (
-        "scored", "applied", "skipped", "rejected", "discovered"
-    )}
+    live_stats = {
+        k: v
+        for k, v in sorted(data["stats"].items(), key=lambda x: -x[1])
+        if k in ("scored", "applied", "skipped", "rejected", "discovered")
+    }
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -164,37 +123,36 @@ def render_html(data: dict) -> str:
   .btn {{ display: inline-block; padding: .12rem .4rem; border: 1px solid var(--ok); color: var(--ok);
     text-decoration: none; font-size: .75rem; margin-right: .2rem; }}
   .btn.ghost {{ border-color: var(--muted); color: var(--muted); }}
-  tr.note td {{ font-size: .82rem; background: #faf8f4; border-bottom: 2px solid var(--line); }}
   .grid2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 1.4rem; }}
   @media (max-width: 800px) {{ .grid2 {{ grid-template-columns: 1fr; }} }}
+  code {{ font-size: .85em; }}
 </style>
 </head>
 <body>
 <header>
   <h1>Hunt board</h1>
-  <div class="meta">Look → apply → mark · <a href="/">reload</a> · <a href="/refresh">re-run daily</a></div>
+  <div class="meta">Look → apply → mark · core PM only · <a href="/">reload</a> · <a href="/refresh">re-run daily</a></div>
 </header>
 <main>
   <div class="kpis">
     <div class="kpi"><div class="n">{t['review_companies']}</div><div class="l">To review</div></div>
     <div class="kpi"><div class="n">{t['applied_companies']}</div><div class="l">Applied cos</div></div>
-    <div class="kpi"><div class="n">{t['scored']}</div><div class="l">Scored roles</div></div>
-    <div class="kpi"><div class="n">{prec_s}</div><div class="l">Precision 7d</div></div>
     <div class="kpi"><div class="n">{t.get('applies_7d', 0)}</div><div class="l">Applies 7d</div></div>
+    <div class="kpi"><div class="n">{prec_s}</div><div class="l">Precision 7d</div></div>
     <div class="kpi"><div class="n">{med_s}</div><div class="l">Med hrs→apply</div></div>
   </div>
 
   <section>
-    <h2>Review (1 best role / company)</h2>
+    <h2>Review — 1 best core PM / company</h2>
     <table>
-      <thead><tr><th>Score</th><th>Track</th><th>Company</th><th>Title</th><th>Location</th><th>+</th><th></th></tr></thead>
+      <thead><tr><th>Score</th><th>Company</th><th>Title</th><th>Location</th><th>+</th><th></th></tr></thead>
       <tbody>{review_rows}</tbody>
     </table>
   </section>
 
   <div class="grid2">
     <section>
-      <h2>Already applied / out (inbox)</h2>
+      <h2>Already applied / out</h2>
       <table>
         <thead><tr><th>Company</th><th>Source</th></tr></thead>
         <tbody>{applied_cos}</tbody>
@@ -249,7 +207,6 @@ class BoardHandler(BaseHTTPRequestHandler):
                     payload={
                         "company": (job or {}).get("company"),
                         "hours_to_applied": hours,
-                        "prepped": int((job or {}).get("prepped") or 0),
                     },
                 )
             elif jid and op == "skip":
@@ -258,65 +215,14 @@ class BoardHandler(BaseHTTPRequestHandler):
                 db.log_event(
                     "skipped",
                     job_id=jid,
-                    payload={"company": (job or {}).get("company"), "title": (job or {}).get("title")},
+                    payload={"company": (job or {}).get("company")},
                 )
-            elif jid and op == "prep":
-                try:
-                    from .prep import run_prep
-
-                    run_prep(jid)
-                except Exception as e:
-                    console.print(f"[red]prep failed[/] {e}")
-            self.send_response(302)
+            self.send_response(303)
             self.send_header("Location", "/")
-            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return
 
-        # Old "refresh" only re-read SQLite. This re-runs inbox → discover → score.
-        if parsed.path == "/refresh":
-            page = """<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/><title>Re-running daily…</title>
-<style>body{font-family:system-ui,sans-serif;padding:2rem;max-width:36rem}
-.dim{color:#666} .err{color:#a00;white-space:pre-wrap}</style></head>
-<body>
-<h1>Re-running daily…</h1>
-<p class="dim">Inbox → discover → score. Usually 30–60s — leave this tab open.</p>
-<p id="status">Starting…</p>
-<script>
-fetch('/api/run-daily').then(async (r) => {
-  const t = await r.text();
-  if (!r.ok) throw new Error(t || r.statusText);
-  document.getElementById('status').textContent = 'Done — reloading board…';
-  location.href = '/';
-}).catch((e) => {
-  document.getElementById('status').innerHTML =
-    '<span class="err">Failed: ' + e + '</span><br/><a href="/">Back to board</a>';
-});
-</script>
-</body></html>"""
-            self._send_html(page.encode("utf-8"))
-            return
-
-        if parsed.path == "/api/run-daily":
-            try:
-                from .pipeline import run_daily
-
-                console.print("[bold]ui[/] re-run daily from browser…")
-                run_daily()
-                body = b'{"ok":true}'
-                self.send_response(200)
-            except Exception as e:
-                body = json.dumps({"ok": False, "error": str(e)}).encode("utf-8")
-                self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-
-        if parsed.path in ("/", "/index.html", "/board"):
+        if parsed.path in ("/", "/board"):
             self._send_html(render_html(snapshot()).encode("utf-8"))
             return
 
@@ -324,62 +230,71 @@ fetch('/api/run-daily').then(async (r) => {
             body = json.dumps(snapshot(), default=str).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return
 
-        self.send_response(404)
-        self.end_headers()
+        if parsed.path == "/refresh":
+            self.send_response(303)
+            self.send_header("Location", "/api/run-daily")
+            self.end_headers()
+            return
+
+        if parsed.path == "/api/run-daily":
+            from .pipeline import run_daily
+
+            try:
+                run_daily(skip_inbox=False)
+                msg = "Daily finished. <a href='/'>Back to board</a>"
+            except Exception as e:
+                msg = f"Daily failed: {_esc(e)}. <a href='/'>Back</a>"
+            self._send_html(f"<html><body><p>{msg}</p></body></html>".encode("utf-8"))
+            return
+
+        self.send_error(404)
+
+    def do_POST(self) -> None:
+        self.send_error(405)
 
 
 def serve(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
-    server = ThreadingHTTPServer(("127.0.0.1", port), BoardHandler)
+    db.init_db()
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), BoardHandler)
     url = f"http://127.0.0.1:{port}/"
-    console.print(f"[green]Hunt board[/] → {url}")
-    console.print("[dim]Ctrl+C to stop[/]")
+    data = snapshot()
+    console.print(
+        Panel.fit(
+            f"[bold]Hunt board[/] → {url}\n"
+            f"{data['totals']['review_companies']} core PM companies to review · "
+            f"{data['totals']['applied_companies']} applied/out",
+            title="look → apply → mark",
+        )
+    )
     if open_browser:
         webbrowser.open(url)
     try:
-        server.serve_forever()
+        httpd.serve_forever()
     except KeyboardInterrupt:
-        console.print("\nStopped.")
-    finally:
-        server.server_close()
+        console.print("\n[dim]ui stopped[/]")
 
 
-def print_board() -> None:
+def print_board(limit: int = 25) -> None:
     data = snapshot()
-    t = data["totals"]
-    console.print(
-        Panel.fit(
-            f"[bold]Review[/] {t['review_companies']} cos · "
-            f"[bold]Applied cos[/] {t['applied_companies']} · "
-            f"[bold]Scored[/] {t['scored']}",
-            title="Hunt board",
-        )
-    )
-    table = Table(title="Review (1 / company)")
+    table = Table(title="Review — core PM (1 / company)")
     table.add_column("Score", justify="right")
-    table.add_column("Track")
     table.add_column("Company")
     table.add_column("Title")
-    table.add_column("+", justify="right", style="dim")
-    for r in data["review"]:
-        sib = int(r.get("sibling_roles") or 0)
+    table.add_column("Location")
+    table.add_column("URL")
+    for r in data["review"][:limit]:
         table.add_row(
             f"{r.get('score', 0):.2f}",
-            r.get("track") or "core",
-            r["company"][:18],
-            r["title"][:40],
-            f"+{sib}" if sib else "",
+            r["company"],
+            (r.get("title") or "")[:48],
+            (r.get("location") or "")[:28],
+            (r.get("url") or "")[:40],
         )
     console.print(table)
-    cos = Table(title=f"Already applied ({len(data['applied_companies'])})")
-    cos.add_column("Company")
-    cos.add_column("Source")
-    for r in data["applied_companies"][:25]:
-        cos.add_row(r["company"], r.get("source") or "")
-    console.print(cos)
-    console.print("\nBrowser: [bold]hunt ui[/]")
+    if not data["review"]:
+        console.print("[yellow]Empty — hunt daily, or expand boards in config.yaml[/]")

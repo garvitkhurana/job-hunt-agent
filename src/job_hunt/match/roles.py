@@ -269,6 +269,9 @@ HARD_EXCLUDE = [
     r"\bjunior\b",
     r"\bentry[\s-]?level\b",
     r"\bunpaid\b",
+    r"\(explore\)",  # synthetic YC seed cards — not real postings
+    r"\bnew\s+grad\b",
+    r"\b20\d{2}\s*[-–]\s*product\b",  # "2026 - Product Manager" campus pipelines
     r"\baccount\s+executive\b",
     r"\baccount\s+manager\b",
     r"\bsales\s+(?:rep|representative|development)\b",

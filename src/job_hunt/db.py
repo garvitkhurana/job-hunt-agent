@@ -332,18 +332,18 @@ def list_jobs(
 
 def queue_for_review(
     limit: int = 50,
-    track: str | None = None,
+    track: str | None = "core",
     one_per_company: bool = True,
     prefer_core: bool = True,
 ) -> list[dict]:
-    """Scored / ready roles for look+apply. Default: one best role per company (core preferred)."""
+    """Scored / ready roles for look+apply. Default: core PM, one best role per company."""
     from .config import load_config
     from .match.roles import is_hard_excluded
 
     cfg = load_config()
     min_core = cfg.filters.min_score
     min_adj = cfg.filters.min_adjacent_score
-    floor = min(min_core, min_adj)
+    floor = min(min_core, min_adj) if track != "core" else min_core
 
     clause = "AND track = ?" if track else ""
     params: list[Any] = [floor]
@@ -369,6 +369,8 @@ def queue_for_review(
         if is_company_already_applied(row["company"]):
             continue
         if is_hard_excluded(row.get("title") or ""):
+            continue
+        if (row.get("source") or "") == "yc":
             continue
         t = row.get("track") or "core"
         need = min_adj if t == "adjacent" else min_core
@@ -579,12 +581,18 @@ def remember_applied_company(company: str, source: str = "inbox", title: str = "
         return
     # Reject junk sentence-companies / visa spam from bad email parses
     if len(company) > 40 or re.search(
-        r"\b(after reviewing|we'?ve determined|application to|green card|jinee)\b",
+        r"\b(after reviewing|we'?ve determined|application to|green card|jinee|was received)\b",
         company,
         re.I,
     ):
         m = re.match(r"^([A-Z][\w.&'-]{1,30})", company.strip())
-        company = m.group(1) if m and not re.search(r"green|jinee", m.group(1), re.I) else ""
+        company = m.group(1) if m and not re.search(r"green|jinee|was", m.group(1), re.I) else ""
+    # Single junk tokens that are not employers
+    if company and re.fullmatch(
+        r"(?i)career|careers|wes|noreply|notifications?|team|hiring|jobs?",
+        company.strip(),
+    ):
+        return
     if not company:
         return
     now = datetime.utcnow().isoformat()
@@ -603,6 +611,40 @@ def remember_applied_company(company: str, source: str = "inbox", title: str = "
             """,
             (key, company.strip(), title or "", source, now, now),
         )
+
+
+_JUNK_APPLIED_NORMS = frozenset(
+    {
+        "career",
+        "careers",
+        "wes",
+        "artificial",  # incomplete parse
+        "angelo salerno",  # person, not employer
+        "llamaindex was received",
+        "physical intelligence we",
+    }
+)
+
+
+def purge_junk_applied_companies() -> int:
+    """Remove bad inbox parses that block discovery without being real employers."""
+    removed = 0
+    with connect() as conn:
+        rows = conn.execute("SELECT company_norm, company FROM applied_companies").fetchall()
+        for r in rows:
+            norm = (r["company_norm"] or "").strip()
+            name = (r["company"] or "").strip()
+            junk = (
+                norm in _JUNK_APPLIED_NORMS
+                or name.lower() in _JUNK_APPLIED_NORMS
+                or "was received" in name.lower()
+                or re.fullmatch(r"(?i)career|careers|wes", name)
+                or (len(name) > 40)
+            )
+            if junk:
+                conn.execute("DELETE FROM applied_companies WHERE company_norm=?", (norm,))
+                removed += 1
+    return removed
 
 
 def list_applied_companies(limit: int = 500) -> list[dict]:

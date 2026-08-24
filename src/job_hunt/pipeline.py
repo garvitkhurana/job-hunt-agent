@@ -22,15 +22,35 @@ _OPEN_FOR_RESCORE = (
 def run_discover(cfg: AppConfig) -> list:
     boards_gh = list(dict.fromkeys(cfg.sources.greenhouse_boards + cfg.sources.extra_greenhouse))
     boards_ashby = list(dict.fromkeys(cfg.sources.ashby_boards + cfg.sources.extra_ashby))
-    console.print(f"[bold]Discovering[/] from {len(boards_gh)} Greenhouse + {len(boards_ashby)} Ashby boards…")
+    skip_keys = {
+        db._norm_company_key(a["company"])
+        for a in db.list_applied_companies(limit=1000)
+        if a.get("company")
+    }
+    # Also skip cos with applied/rejected tracker rows
+    for r in db.list_jobs(limit=5000):
+        if r.get("status") in (
+            JobStatus.APPLIED.value,
+            JobStatus.REJECTED.value,
+            JobStatus.INTERVIEW.value,
+            JobStatus.OUTREACH_SENT.value,
+        ):
+            skip_keys.add(db._norm_company_key(r["company"]))
+    console.print(
+        f"[bold]Discovering[/] from {len(boards_gh)} Greenhouse + {len(boards_ashby)} Ashby boards "
+        f"(skip {len(skip_keys)} applied/out cos)…"
+    )
     jobs = discover_all(
         greenhouse_boards=boards_gh,
         ashby_boards=boards_ashby,
         yc_enabled=cfg.sources.yc_enabled,
         max_total=cfg.daily.max_discover,
         include_adjacent=cfg.filters.include_adjacent_roles,
+        skip_company_keys=skip_keys,
     )
     console.print(f"Found [cyan]{len(jobs)}[/] raw roles")
+    cos = sorted({j.company for j in jobs})
+    console.print(f"[dim]Companies this run: {', '.join(cos[:20])}{'…' if len(cos) > 20 else ''}[/]")
     for job in jobs:
         db.upsert_job(job, status=JobStatus.DISCOVERED)
     return jobs
@@ -194,6 +214,9 @@ def run_daily(
     cfg = cfg or load_config()
     db.init_db()
     t0 = time.time()
+    purged = db.purge_junk_applied_companies()
+    if purged:
+        console.print(f"[dim]Purged {purged} junk applied-company entries[/]")
     if not skip_inbox:
         run_inbox_scan()
     jobs = run_discover(cfg)
@@ -203,14 +226,14 @@ def run_daily(
     if skipped_applied:
         console.print(f"Skipped [yellow]{skipped_applied}[/] roles at already-applied companies")
 
-    # One best role per company — core preferred over adjacent
-    review = db.queue_for_review(limit=cfg.daily.app_target + cfg.daily.adjacent_target, one_per_company=True)
-    core_n = sum(1 for r in review if (r.get("track") or "core") == "core")
-    adj_n = len(review) - core_n
+    # One best core PM per company
+    review = db.queue_for_review(limit=cfg.daily.app_target, track="core", one_per_company=True)
+    core_n = len(review)
+    adj_n = 0
     stretch_n = sum(
         1
         for j, b in above
-        if any("stretch" in (r or "") for r in (b.reasons or []))
+        if b.track == "core" and any("stretch" in (r or "") for r in (b.reasons or []))
     )
     elapsed = round(time.time() - t0, 1)
     db.log_event(
@@ -232,10 +255,7 @@ def run_daily(
             job_id=r["id"],
             payload={"company": r["company"], "score": r.get("score"), "track": r.get("track")},
         )
-    console.print(
-        f"Review ready: [green]{len(review)}[/] companies "
-        f"([cyan]{core_n}[/] core · [magenta]{adj_n}[/] adjacent) — 1 best role each"
-    )
+    console.print(f"Review ready: [green]{len(review)}[/] core PM companies — 1 best role each")
     console.print("Stats:", db.stats())
     console.print(f"[dim]daily {elapsed}s — hunt metrics to see funnel[/]")
     console.print("Next: [bold]hunt ui[/] or [bold]hunt board[/] → apply → mark applied")

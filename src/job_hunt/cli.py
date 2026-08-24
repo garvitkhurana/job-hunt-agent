@@ -116,11 +116,11 @@ def rescore() -> None:
     cfg = load_config()
     db.init_db()
     run_rescore(cfg)
-    review = db.queue_for_review(limit=20, one_per_company=True)
-    console.print(f"Review now: [green]{len(review)}[/] companies")
+    review = db.queue_for_review(limit=20, track="core", one_per_company=True)
+    console.print(f"Review now: [green]{len(review)}[/] core PM companies")
     for r in review[:10]:
         console.print(
-            f"  {r.get('score', 0):.2f} [{r.get('track') or 'core'}] "
+            f"  {r.get('score', 0):.2f} "
             f"{r['company']} — {r['title'][:55]}"
         )
 
@@ -139,10 +139,10 @@ def packets(
 @app.command()
 def review(
     limit: int = typer.Option(30, help="How many companies to show (one best role each)"),
-    track: Optional[str] = typer.Option(None, help="Filter: core | adjacent"),
+    track: Optional[str] = typer.Option("core", help="Filter: core | adjacent (default core)"),
     all_roles: bool = typer.Option(False, "--all-roles", help="Show every role (no company dedupe)"),
 ) -> None:
-    """Batch review queue — one best role per company by default."""
+    """Batch review queue — core PM, one best role per company by default."""
     db.init_db()
     rows = db.queue_for_review(limit=limit, track=track, one_per_company=not all_roles)
     if not rows:
