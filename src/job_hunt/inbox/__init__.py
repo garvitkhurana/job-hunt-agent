@@ -163,7 +163,7 @@ def _plain_body(msg: email.message.Message) -> str:
 
 def _clean_company(name: str) -> str:
     name = re.sub(r"\s+", " ", name or "").strip(" \t\n\r\"'.,;:|!-")
-    # Cut off if we accidentally grabbed a whole sentence
+    # Cut off if we accidentally grabbed a whole sentence / receipt trailer
     for stopper in (
         ". We ",
         ". Your ",
@@ -172,6 +172,11 @@ def _clean_company(name: str) -> str:
         " - we ",
         " we appreciate",
         " hiring team",
+        " was received",
+        " has been received",
+        " is received",
+        " submitted",
+        " confirmation",
     ):
         idx = name.lower().find(stopper.lower())
         if idx > 2:
@@ -179,11 +184,13 @@ def _clean_company(name: str) -> str:
     name = re.sub(r"[!]+$", "", name).strip()
     # Drop trailing fluff
     name = re.sub(
-        r"\b(careers|recruiting|talent|team|hiring|inc|llc|ltd)\.?$",
+        r"\b(careers|recruiting|talent|team|hiring|inc|llc|ltd|was|received|submitted)\.?$",
         "",
         name,
         flags=re.I,
     ).strip(" -")
+    # Second pass if "LlamaIndex was" style leftover
+    name = re.sub(r"\b(was|has been)\b.*$", "", name, flags=re.I).strip(" -")
     # Reject role titles mistaken for companies
     if re.search(
         r"\b(product manager|forward.?deployed|engineer|director|internship)\b",
@@ -229,7 +236,13 @@ def _extract_from_subject(subject: str) -> tuple[str, str]:
     if m and m.group(1):
         return _clean_company(m.group(1)), ""
     # "Your application for Senior PM at Stripe" / "Your application to Stripe"
-    m = re.search(r"your\s+application\s+(?:for\s+(.+?)\s+at\s+|to\s+)(.+?)(?:\s*[!.]|$)", s, re.I)
+    # Also: "Your application to LlamaIndex was received"
+    m = re.search(
+        r"your\s+application\s+(?:for\s+(.+?)\s+at\s+|to\s+)"
+        r"(.+?)(?:\s+(?:was|has been)\s+received|\s*[!.]|$)",
+        s,
+        re.I,
+    )
     if m:
         title = (m.group(1) or "").strip()[:120]
         return _clean_company(m.group(2)), title
@@ -266,8 +279,12 @@ def _extract_from_subject(subject: str) -> tuple[str, str]:
     m = re.search(r"^([A-Z][\w\s.&'-]{1,40}):\s*application", s, re.I)
     if m:
         return _clean_company(m.group(1)), ""
-    # "Regarding your application to Modal"
-    m = re.search(r"application\s+to\s+(.+?)(?:\s*[!.]|$)", s, re.I)
+    # "Regarding your application to Modal" / "... to LlamaIndex was received"
+    m = re.search(
+        r"application\s+to\s+(.+?)(?:\s+(?:was|has been)\s+received|\s*[!.]|$)",
+        s,
+        re.I,
+    )
     if m:
         return _clean_company(m.group(1)), ""
     # "Discord! Thanks for applying" style — company bang at start

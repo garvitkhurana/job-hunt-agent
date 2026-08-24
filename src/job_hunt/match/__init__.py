@@ -250,10 +250,11 @@ def score_job(job: Job, cfg: AppConfig) -> ScoreBreakdown:
 
     # Visa-friendly boost: London / Canada / UK outrank equivalent US roles
     priority_boost = 0.0
+    visa_boost = getattr(cfg.filters, "visa_priority_boost", 0.08) or 0.08
     for p in cfg.candidate.priority_locations or []:
         needles = GEO_ALIASES.get(p.lower(), (p.lower(),))
         if any(n and (n in loc_blob or n in title) for n in needles):
-            priority_boost = 0.08
+            priority_boost = visa_boost
             reasons.append(f"visa_priority:{p}")
             break
 
@@ -267,19 +268,20 @@ def score_job(job: Job, cfg: AppConfig) -> ScoreBreakdown:
     )
 
     if "founding" in title:
-        total = min(1.0, total + 0.07)
+        total = min(1.0, total + (getattr(cfg.filters, "founding_boost", 0.07) or 0.07))
         reasons.append("founding_boost")
     if re.search(r"\bai\b|\bllm\b|\bml\b|\bgenai\b", title):
-        total = min(1.0, total + 0.05)
+        total = min(1.0, total + (getattr(cfg.filters, "ai_title_boost", 0.05) or 0.05))
         reasons.append("ai_title_boost")
     if track == "adjacent":
-        total *= 0.92
+        total *= getattr(cfg.filters, "adjacent_track_mult", 0.92) or 0.92
         reasons.append("adjacent_track")
     if stretch:
-        total *= 0.72
+        total *= getattr(cfg.filters, "stretch_penalty", 0.72) or 0.72
         reasons.append("stretch_penalty")
+        stretch_bar = getattr(cfg.filters, "stretch_min_score", 0.78) or 0.78
         # Drop stretch roles that don't clear a higher bar
-        if total < max(cfg.filters.min_score, 0.78):
+        if total < max(cfg.filters.min_score, stretch_bar):
             return ScoreBreakdown(
                 total=round(total, 3),
                 role_fit=round(role_fit, 3),

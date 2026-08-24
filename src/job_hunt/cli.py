@@ -14,7 +14,12 @@ from .models import JobStatus
 from .pipeline import run_daily, run_discover, run_packets, run_score
 from .followup import process_due_followups
 
-app = typer.Typer(help="Garvit's job hunt agent — discover, tailor, review, follow up.")
+app = typer.Typer(
+    help="Job hunt agent — look → apply → mark. Metrics-first.",
+    no_args_is_help=True,
+)
+legacy_app = typer.Typer(help="Legacy writer/outreach commands (soft-deprecated).")
+app.add_typer(legacy_app, name="legacy")
 console = Console()
 
 
@@ -27,8 +32,7 @@ def init() -> None:
     if not env_path.exists() and example.exists():
         env_path.write_text(example.read_text())
         console.print(
-            "[yellow]Created .env from example — add NVIDIA_API_KEY and/or "
-            "OPENROUTER_API_KEY for free LLM generation[/]"
+            "[yellow]Created .env — add SMTP for inbox; ANTHROPIC_API_KEY for hunt prep[/]"
         )
     console.print(f"[green]DB ready:[/] {db_path()}")
 
@@ -45,6 +49,53 @@ def daily(
 
 
 @app.command()
+def metrics(
+    days: int = typer.Option(30, help="Lookback window"),
+    baseline: bool = typer.Option(False, "--baseline", help="Write/overwrite output/metrics/baseline.json"),
+) -> None:
+    """Funnel KPIs — precision, applies/week, outcomes, prep lift."""
+    from .metrics import print_metrics, write_baseline, compute_metrics
+
+    db.init_db()
+    m = print_metrics(since_days=days, save_baseline=baseline)
+    if baseline:
+        path = write_baseline(m)
+        console.print(f"[green]Baseline saved[/] {path}")
+
+
+@app.command()
+def outcome(
+    job_id: str,
+    result: str = typer.Argument(..., help="interview | rejected | ghost"),
+) -> None:
+    """Log application outcome for metrics (closes the funnel)."""
+    db.init_db()
+    result = result.strip().lower()
+    if result not in ("interview", "rejected", "ghost"):
+        console.print("[red]result must be interview | rejected | ghost[/]")
+        raise typer.Exit(1)
+    job = db.get_job(job_id)
+    if not job:
+        console.print("[red]Job not found[/]")
+        raise typer.Exit(1)
+    db.set_outcome(job_id, result)
+    console.print(f"[green]Outcome[/] {job['company']} → {result}")
+
+
+@app.command()
+def prep(
+    job_id: str,
+    no_llm: bool = typer.Option(False, help="Template-only prep (no API)"),
+) -> None:
+    """On-demand materials: research + draft + reviewer → output/prep/."""
+    from .prep import run_prep
+
+    db.init_db()
+    path = run_prep(job_id, use_llm=not no_llm)
+    console.print(f"Open [bold]{path / 'PREP.md'}[/]")
+
+
+@app.command()
 def discover() -> None:
     cfg = load_config()
     db.init_db()
@@ -58,11 +109,12 @@ def score() -> None:
     run_score(cfg)
 
 
-@app.command()
+@legacy_app.command("packets")
 def packets(
     limit: int = typer.Option(70, help="Max packets to generate"),
     no_llm: bool = typer.Option(False),
 ) -> None:
+    """[legacy] Generate LLM application packets."""
     cfg = load_config()
     db.init_db()
     run_packets(cfg, limit=limit, use_llm=not no_llm)
@@ -105,10 +157,9 @@ def review(
     if not all_roles:
         console.print("[dim]+N = other scored/ready roles at same company (hidden to avoid over-indexing)[/]")
         console.print("See all roles: [bold]hunt review --all-roles[/]")
-    console.print("\nOpen a packet: [bold]hunt show <id>[/]")
-    console.print("After you submit: [bold]hunt approve <id> --applied[/]")
-    console.print("Skip company pick: [bold]hunt skip <id>[/]  (then re-run review for next-best at that co)")
-    console.print("Outreach: [bold]hunt approve <id> --outreach[/]")
+    console.print("\nApply on ATS, then: [bold]hunt approve <id> --applied[/]")
+    console.print("Or prep materials: [bold]hunt prep <id>[/]")
+    console.print("Skip: [bold]hunt skip <id>[/] · Funnel: [bold]hunt metrics[/]")
 
 
 @app.command()
@@ -159,7 +210,7 @@ def suggest(
     console.print("Review just these: [bold]hunt review --track adjacent[/]")
 
 
-@app.command()
+@legacy_app.command("contacts")
 def contacts(job_id: str) -> None:
     """Build an outreach target sheet — who to contact + LinkedIn search URLs + email guesses."""
     from .contacts import find_contacts
@@ -197,7 +248,7 @@ def contacts(job_id: str) -> None:
     console.print("Send email (dry-run): [bold]hunt send " + job_id + " --to someone@company.com[/]")
 
 
-@app.command()
+@legacy_app.command("send")
 def send(
     job_id: str,
     to: str = typer.Option(..., "--to", help="Recipient email"),
@@ -213,7 +264,7 @@ def send(
     packet = db.get_packet(job_id)
     job = db.get_job(job_id)
     if not packet or not job:
-        console.print("[red]No packet — run hunt packets first[/]")
+        console.print("[red]No packet — run hunt legacy packets first[/]")
         raise typer.Exit(1)
     subject = packet.get("email_subject") or f"{job['title']} — Garvit Khurana"
     body = (packet.get("email_body") or "").replace("{name}", name)
@@ -227,7 +278,7 @@ def send(
         console.print("[yellow]Dry-run — add --send to actually deliver.[/] Provider: " + active_provider())
 
 
-@app.command("send-batch")
+@legacy_app.command("send-batch")
 def send_batch(
     limit: int = typer.Option(20, help="Max emails"),
     send: bool = typer.Option(False, "--send", help="Actually send"),
@@ -260,7 +311,7 @@ def send_batch(
     console.print(f"\n{'Sent' if send else 'Dry-ran'} {sent or len(targets[:limit])} ({active_provider()})")
 
 
-@app.command("set-email")
+@legacy_app.command("set-email")
 def set_email(job_id: str, email: str) -> None:
     """Record the recipient email for a job (used by send-batch)."""
     db.init_db()
@@ -268,7 +319,7 @@ def set_email(job_id: str, email: str) -> None:
     console.print(f"[green]Recorded[/] {email} for {job_id}")
 
 
-@app.command()
+@legacy_app.command("show")
 def show(job_id: str) -> None:
     db.init_db()
     job = db.get_job(job_id)
@@ -320,6 +371,7 @@ def approve(
     if not applied and not outreach:
         outreach = True
     if applied:
+        hours = db.hours_since_created(job_id)
         db.mark_sent(
             job_id,
             touch_type="application",
@@ -330,6 +382,15 @@ def approve(
         )
         db.remember_applied_company(job["company"], source="manual", title=job.get("title") or "")
         parked = db.park_packets_at_applied_companies()
+        db.log_event(
+            "applied",
+            job_id=job_id,
+            payload={
+                "company": job["company"],
+                "hours_to_applied": hours,
+                "prepped": int(job.get("prepped") or 0),
+            },
+        )
         console.print(f"[green]Marked APPLIED[/] {job['company']} — follow-ups scheduled")
         if parked:
             console.print(f"[dim]Parked {parked} other roles at already-applied companies[/]")
@@ -345,7 +406,7 @@ def approve(
         console.print(f"[green]Marked OUTREACH SENT[/] {job['company']} — follow-ups scheduled")
 
 
-@app.command("approve-all")
+@legacy_app.command("approve-all")
 def approve_all(
     outreach: bool = typer.Option(True, help="Mark all queued as outreach sent"),
     applied: bool = typer.Option(False, help="Mark all queued as applied"),
@@ -369,16 +430,22 @@ def approve_all(
 @app.command()
 def skip(job_id: str) -> None:
     db.init_db()
+    job = db.get_job(job_id)
     db.set_status(job_id, JobStatus.SKIPPED)
+    db.log_event(
+        "skipped",
+        job_id=job_id,
+        payload={"company": (job or {}).get("company"), "title": (job or {}).get("title")},
+    )
     console.print(f"Skipped {job_id}")
 
 
-@app.command()
+@legacy_app.command("followups")
 def followups(
     mark: bool = typer.Option(False, "--mark", help="Mark drafts as sent after printing"),
     limit: int = typer.Option(50),
 ) -> None:
-    """Show (and optionally mark) due follow-ups — run daily for high follow-up rate."""
+    """[legacy] Due follow-up drafts."""
     cfg = load_config()
     db.init_db()
     items = process_due_followups(cfg, auto_mark=mark, limit=limit)
@@ -530,7 +597,7 @@ def add_job(
 
     b = score_job(job, cfg)
     db.update_score(job.id, b.total, b.model_dump())
-    console.print(f"Added {jid} score={b.total:.2f} — run [bold]hunt packets[/] to generate materials")
+    console.print(f"Added {jid} score={b.total:.2f} — run [bold]hunt prep {jid}[/] for materials")
 
 
 def main() -> None:

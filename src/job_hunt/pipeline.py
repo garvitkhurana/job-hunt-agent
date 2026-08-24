@@ -129,9 +129,12 @@ def run_daily(
     skip_inbox: bool = False,
 ) -> None:
     """Look+apply loop: inbox → discover → score → board (no LLM packets)."""
+    import time
+
     _ = use_llm
     cfg = cfg or load_config()
     db.init_db()
+    t0 = time.time()
     if not skip_inbox:
         run_inbox_scan()
     jobs = run_discover(cfg)
@@ -144,9 +147,35 @@ def run_daily(
     review = db.queue_for_review(limit=cfg.daily.app_target + cfg.daily.adjacent_target, one_per_company=True)
     core_n = sum(1 for r in review if (r.get("track") or "core") == "core")
     adj_n = len(review) - core_n
+    stretch_n = sum(
+        1
+        for j, b in above
+        if any("stretch" in (r or "") for r in (b.reasons or []))
+    )
+    elapsed = round(time.time() - t0, 1)
+    db.log_event(
+        "daily_run",
+        payload={
+            "raw_roles": len(jobs),
+            "qualifying": len(above),
+            "core_n": core_n,
+            "adj_n": adj_n,
+            "review_companies": len(review),
+            "skipped_applied": skipped_applied,
+            "stretch_tagged": stretch_n,
+            "elapsed_sec": elapsed,
+        },
+    )
+    for r in review:
+        db.log_event(
+            "review_shown",
+            job_id=r["id"],
+            payload={"company": r["company"], "score": r.get("score"), "track": r.get("track")},
+        )
     console.print(
         f"Review ready: [green]{len(review)}[/] companies "
         f"([cyan]{core_n}[/] core · [magenta]{adj_n}[/] adjacent) — 1 best role each"
     )
     console.print("Stats:", db.stats())
+    console.print(f"[dim]daily {elapsed}s — hunt metrics to see funnel[/]")
     console.print("Next: [bold]hunt ui[/] or [bold]hunt board[/] → apply → mark applied")

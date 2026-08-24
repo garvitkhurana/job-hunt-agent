@@ -85,10 +85,20 @@ CREATE TABLE IF NOT EXISTS applied_companies (
     last_seen_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    job_id TEXT,
+    payload_json TEXT DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_score ON jobs(score DESC);
 CREATE INDEX IF NOT EXISTS idx_jobs_next_followup ON jobs(next_followup_at);
 CREATE INDEX IF NOT EXISTS idx_applied_companies_name ON applied_companies(company);
+CREATE INDEX IF NOT EXISTS idx_events_type_created ON events(event_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id);
 """
 
 
@@ -110,6 +120,9 @@ MIGRATIONS = [
     ("role_family", "TEXT DEFAULT ''"),
     ("company_tier", "TEXT DEFAULT 'unknown'"),
     ("company_score", "REAL DEFAULT 0"),
+    ("prepped", "INTEGER DEFAULT 0"),
+    ("outcome", "TEXT DEFAULT ''"),
+    ("outcome_at", "TEXT"),
 ]
 
 
@@ -653,6 +666,77 @@ def list_inbox_hits(limit: int = 100) -> list[dict]:
             (limit,),
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def log_event(event_type: str, job_id: str | None = None, payload: dict | None = None) -> None:
+    now = datetime.utcnow().isoformat()
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO events (event_type, job_id, payload_json, created_at) VALUES (?,?,?,?)",
+            (event_type, job_id, json.dumps(payload or {}), now),
+        )
+
+
+def list_events(since: str | None = None, limit: int = 10_000) -> list[dict]:
+    with connect() as conn:
+        if since:
+            rows = conn.execute(
+                """
+                SELECT * FROM events
+                WHERE created_at >= ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (since, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM events ORDER BY created_at ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["payload"] = json.loads(d.pop("payload_json") or "{}")
+        except json.JSONDecodeError:
+            d["payload"] = {}
+        out.append(d)
+    return out
+
+
+def set_outcome(job_id: str, outcome: str) -> None:
+    """outcome: interview | rejected | ghost"""
+    now = datetime.utcnow().isoformat()
+    with connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET outcome=?, outcome_at=?, updated_at=? WHERE id=?",
+            (outcome, now, now, job_id),
+        )
+    log_event(f"outcome_{outcome}", job_id=job_id, payload={"outcome": outcome})
+
+
+def set_prepped(job_id: str, prepped: bool = True) -> None:
+    now = datetime.utcnow().isoformat()
+    with connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET prepped=?, updated_at=? WHERE id=?",
+            (1 if prepped else 0, now, job_id),
+        )
+
+
+def hours_since_created(job_id: str) -> float | None:
+    job = get_job(job_id)
+    if not job:
+        return None
+    created = job.get("created_at")
+    if not created:
+        return None
+    try:
+        c = datetime.fromisoformat(created.replace("Z", ""))
+    except ValueError:
+        return None
+    return round((datetime.utcnow() - c).total_seconds() / 3600.0, 2)
 
 
 def job_from_row(row: dict) -> Job:
